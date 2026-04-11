@@ -1,11 +1,11 @@
-# Crossfire MCP
+# Debate MCP
 
 **Stress-test your decisions before you commit.** An MCP server that runs adversarial AI debates between frontier models, grounded in live web search.
 
-Most AI tools optimize for consensus. Crossfire optimizes for **finding where your plan breaks.**
+Most AI tools optimize for consensus. Debate MCP optimizes for **finding where your plan breaks.**
 
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![npm](https://img.shields.io/npm/v/crossfire-mcp)](https://www.npmjs.com/package/crossfire-mcp)
+[![npm](https://img.shields.io/npm/v/debate-mcp)](https://www.npmjs.com/package/debate-mcp)
 
 ## How It Works
 
@@ -43,12 +43,12 @@ You describe your plan
 
 **1. Install**
 ```bash
-npx crossfire-mcp
+npx debate-mcp
 ```
 
 **2. Add to Claude Code**
 ```bash
-claude mcp add crossfire npx crossfire-mcp \
+claude mcp add debate npx debate-mcp \
   -e OPENAI_API_KEY=sk-... \
   -e GEMINI_API_KEY=AI...
 ```
@@ -102,9 +102,9 @@ Just tell Claude: *"debate this"*, *"what am I missing"*, *"stress-test this pla
 ```json
 {
   "mcpServers": {
-    "crossfire": {
+    "debate": {
       "command": "npx",
-      "args": ["-y", "crossfire-mcp"],
+      "args": ["-y", "debate-mcp"],
       "env": {
         "OPENAI_API_KEY": "sk-...",
         "GEMINI_API_KEY": "AI..."
@@ -115,7 +115,7 @@ Just tell Claude: *"debate this"*, *"what am I missing"*, *"stress-test this pla
 ```
 
 > [!NOTE]
-> **Bring your own API keys.** Crossfire calls OpenAI and Google APIs directly. You are responsible for your own API usage and costs. A typical debate uses ~20,000-30,000 tokens across both providers.
+> **Bring your own API keys.** Debate MCP calls OpenAI and Google APIs directly. You are responsible for your own API usage and costs. A typical debate uses ~20,000-30,000 tokens across both providers.
 
 ## Tool Parameters
 
@@ -128,7 +128,7 @@ Just tell Claude: *"debate this"*, *"what am I missing"*, *"stress-test this pla
 
 ## The Research Behind It
 
-Crossfire's design is based on peer-reviewed research on multi-agent debate:
+Debate MCP's design is based on peer-reviewed research on multi-agent debate:
 
 - **Asymmetric roles** outperform identical prompts (*"Peacemaker or Troublemaker: How Sycophancy Shapes Multi-Agent Debate"*, 2025)
 - **Anonymized cross-examination** prevents identity bias (*"When Identity Skews Debate"*, NeurIPS 2025)
