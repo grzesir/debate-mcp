@@ -7,12 +7,26 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { z } from "zod";
 
 // --- Configurable via environment variables ---
-const GPT_MODEL = process.env.GPT_MODEL || "gpt-5.4";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.1-pro-preview";
+// Skeptic model (OpenAI-compatible: works with OpenAI, Grok, Groq, Mistral, Together AI, Ollama, etc.)
+const SKEPTIC_MODEL = process.env.SKEPTIC_MODEL || process.env.GPT_MODEL || "gpt-5.4";
+const SKEPTIC_BASE_URL = process.env.SKEPTIC_BASE_URL || process.env.OPENAI_BASE_URL || undefined;
+// Steelman model (Gemini by default for Google Search grounding, or OpenAI-compatible via STEELMAN_PROVIDER=openai)
+const STEELMAN_MODEL = process.env.STEELMAN_MODEL || process.env.GEMINI_MODEL || "gemini-3.1-pro-preview";
+const STEELMAN_PROVIDER = process.env.STEELMAN_PROVIDER || "gemini"; // "gemini" or "openai"
+const STEELMAN_BASE_URL = process.env.STEELMAN_BASE_URL || undefined;
+const STEELMAN_API_KEY = process.env.STEELMAN_API_KEY || process.env.GEMINI_API_KEY;
 const CALL_TIMEOUT_MS = parseInt(process.env.CALL_TIMEOUT_MS || "90000");
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: SKEPTIC_BASE_URL,
+});
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+
+// Secondary OpenAI-compatible client for steelman (when STEELMAN_PROVIDER=openai)
+const steelmanOpenAI = STEELMAN_PROVIDER === "openai"
+  ? new OpenAI({ apiKey: STEELMAN_API_KEY, baseURL: STEELMAN_BASE_URL })
+  : null;
 
 // --- Timeout utility ---
 
@@ -88,11 +102,11 @@ function buildSteelmanPrompt(domain) {
 
 // --- Model callers with timeout and graceful error handling ---
 
-async function callGPT(prompt, systemPrompt) {
+async function callSkeptic(prompt, systemPrompt) {
   try {
     const response = await withTimeout(
       openai.chat.completions.create({
-        model: GPT_MODEL,
+        model: SKEPTIC_MODEL,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: prompt },
@@ -107,14 +121,39 @@ async function callGPT(prompt, systemPrompt) {
       tokens: response.usage?.total_tokens || 0,
     };
   } catch (err) {
-    return { ok: false, text: `[GPT ERROR: ${err.message}]`, tokens: 0 };
+    return { ok: false, text: `[SKEPTIC ERROR: ${err.message}]`, tokens: 0 };
   }
 }
 
-async function callGemini(prompt, systemPrompt, enableSearch = false) {
+async function callSteelman(prompt, systemPrompt, enableSearch = false) {
+  // If steelman is configured as OpenAI-compatible (Grok, Groq, Claude, etc.)
+  if (STEELMAN_PROVIDER === "openai" && steelmanOpenAI) {
+    try {
+      const response = await withTimeout(
+        steelmanOpenAI.chat.completions.create({
+          model: STEELMAN_MODEL,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: prompt },
+          ],
+          max_completion_tokens: 4096,
+        }),
+        CALL_TIMEOUT_MS
+      );
+      return {
+        ok: true,
+        text: response.choices[0].message.content,
+        tokens: response.usage?.total_tokens || 0,
+      };
+    } catch (err) {
+      return { ok: false, text: `[STEELMAN ERROR: ${err.message}]`, tokens: 0 };
+    }
+  }
+
+  // Default: Gemini (has Google Search grounding)
   try {
     const config = {
-      model: GEMINI_MODEL,
+      model: STEELMAN_MODEL,
       systemInstruction: systemPrompt,
     };
     if (enableSearch) {
@@ -132,7 +171,7 @@ async function callGemini(prompt, systemPrompt, enableSearch = false) {
       tokens: (usage?.promptTokenCount || 0) + (usage?.candidatesTokenCount || 0),
     };
   } catch (err) {
-    return { ok: false, text: `[GEMINI ERROR: ${err.message}]`, tokens: 0 };
+    return { ok: false, text: `[STEELMAN ERROR: ${err.message}]`, tokens: 0 };
   }
 }
 
@@ -152,7 +191,7 @@ TOPIC: ${question || context}
 
 CONTEXT FOR WHAT MATTERS: ${context.substring(0, 2000)}`;
 
-  return callGemini(
+  return callSteelman(
     searchPrompt,
     "You are a research assistant. Compile factual information from web search results. Be precise and cite sources. Do not give opinions or recommendations.",
     true
@@ -162,7 +201,7 @@ CONTEXT FOR WHAT MATTERS: ${context.substring(0, 2000)}`;
 // --- MCP server ---
 
 const server = new McpServer({
-  name: "crossfire",
+  name: "debate",
   version: "1.0.0",
 });
 
@@ -210,7 +249,7 @@ server.tool(
       evidencePack = evidence.text;
       sections.push(
         `# DEBATE TRANSCRIPT`,
-        `_Models: Analyst A (${GPT_MODEL}, Principled Skeptic${domain ? `, ${domain}` : ""}) | Analyst B (${GEMINI_MODEL}, Steelman Analyst${domain ? `, ${domain}` : ""})_`,
+        `_Models: Analyst A (${SKEPTIC_MODEL}, Principled Skeptic${domain ? `, ${domain}` : ""}) | Analyst B (${STEELMAN_MODEL}, Steelman Analyst${domain ? `, ${domain}` : ""})_`,
         current_leaning ? `_Decision-maker's current leaning: "${current_leaning}" (Skeptic will specifically attack this)_\n` : `\n`,
         `## Phase 0: Evidence Gathered (via Google Search)\n`,
         `${evidencePack}\n`,
@@ -218,7 +257,7 @@ server.tool(
     } else {
       sections.push(
         `# DEBATE TRANSCRIPT`,
-        `_Models: Analyst A (${GPT_MODEL}, Principled Skeptic${domain ? `, ${domain}` : ""}) | Analyst B (${GEMINI_MODEL}, Steelman Analyst${domain ? `, ${domain}` : ""})_`,
+        `_Models: Analyst A (${SKEPTIC_MODEL}, Principled Skeptic${domain ? `, ${domain}` : ""}) | Analyst B (${STEELMAN_MODEL}, Steelman Analyst${domain ? `, ${domain}` : ""})_`,
         current_leaning ? `_Decision-maker's current leaning: "${current_leaning}" (Skeptic will specifically attack this)_\n` : `\n`,
         `_Note: Web search unavailable (${evidence.text}). Debate proceeding without search-grounded evidence._\n`,
       );
@@ -232,8 +271,8 @@ server.tool(
     const r1Prompt = `CONTEXT:\n\n${context}${evidenceSection}\nQUESTION: ${focusQuestion}\n\nProvide your analysis. Structure it with clear sections.`;
 
     const [skepticR1, steelmanR1] = await Promise.all([
-      callGPT(r1Prompt, skepticPrompt),
-      callGemini(r1Prompt, steelmanPrompt),
+      callSkeptic(r1Prompt, skepticPrompt),
+      callSteelman(r1Prompt, steelmanPrompt),
     ]);
     totalTokens += skepticR1.tokens + steelmanR1.tokens;
 
@@ -273,13 +312,13 @@ RESPOND TO THE OTHER ANALYST. Follow these steps exactly:
 6. UNRESOLVED: Name the top 1-2 disagreements that matter most and have not been settled.`;
 
     const [skepticR2, steelmanR2] = await Promise.all([
-      callGPT(
+      callSkeptic(
         crossExamInstructions
           .replace("{MY_ANALYSIS}", skepticR1.text)
           .replace("{OTHER_ANALYSIS}", steelmanR1.text),
         skepticPrompt
       ),
-      callGemini(
+      callSteelman(
         crossExamInstructions
           .replace("{MY_ANALYSIS}", steelmanR1.text)
           .replace("{OTHER_ANALYSIS}", skepticR1.text),

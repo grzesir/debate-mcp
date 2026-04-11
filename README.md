@@ -89,13 +89,44 @@ Just tell Claude: *"debate this"*, *"what am I missing"*, *"stress-test this pla
 
 ### Environment Variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `OPENAI_API_KEY` | Yes | - | Your OpenAI API key |
-| `GEMINI_API_KEY` | Yes | - | Your Google AI API key |
-| `GPT_MODEL` | No | `gpt-5.4` | OpenAI model to use |
-| `GEMINI_MODEL` | No | `gemini-3.1-pro-preview` | Google model to use |
-| `CALL_TIMEOUT_MS` | No | `90000` | Timeout per API call (ms) |
+**Required (at minimum):**
+
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | API key for the Skeptic model (OpenAI by default) |
+| `GEMINI_API_KEY` | API key for the Steelman model (Gemini by default) |
+
+**Model configuration:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SKEPTIC_MODEL` | `gpt-5.4` | Model for the Skeptic role |
+| `SKEPTIC_BASE_URL` | OpenAI default | Base URL for the Skeptic API (change to use Grok, Groq, Mistral, etc.) |
+| `STEELMAN_MODEL` | `gemini-3.1-pro-preview` | Model for the Steelman role |
+| `STEELMAN_PROVIDER` | `gemini` | Set to `openai` to use any OpenAI-compatible API for Steelman |
+| `STEELMAN_BASE_URL` | - | Base URL when using `STEELMAN_PROVIDER=openai` |
+| `STEELMAN_API_KEY` | Falls back to `GEMINI_API_KEY` | API key when using `STEELMAN_PROVIDER=openai` |
+| `CALL_TIMEOUT_MS` | `90000` | Timeout per API call (ms) |
+
+### Use Any Model Provider
+
+The Skeptic role works with **any OpenAI-compatible API** out of the box. Just change the base URL:
+
+```bash
+# Grok (xAI)
+SKEPTIC_BASE_URL=https://api.x.ai/v1 SKEPTIC_MODEL=grok-3 OPENAI_API_KEY=xai-...
+
+# Groq
+SKEPTIC_BASE_URL=https://api.groq.com/openai/v1 SKEPTIC_MODEL=llama-4-scout OPENAI_API_KEY=gsk_...
+
+# Ollama (local, free)
+SKEPTIC_BASE_URL=http://localhost:11434/v1 SKEPTIC_MODEL=llama3 OPENAI_API_KEY=ollama
+
+# Mistral
+SKEPTIC_BASE_URL=https://api.mistral.ai/v1 SKEPTIC_MODEL=mistral-large OPENAI_API_KEY=...
+```
+
+The Steelman role uses Gemini by default (for Google Search grounding). To use a different provider, set `STEELMAN_PROVIDER=openai` and configure the base URL.
 
 ### MCP Configuration (`.mcp.json`)
 
