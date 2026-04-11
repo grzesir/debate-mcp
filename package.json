@@ -1,0 +1,42 @@
+{
+  "name": "crossfire-mcp",
+  "version": "1.0.0",
+  "description": "MCP server that stress-tests your decisions with adversarial AI debate. GPT vs Gemini, Skeptic vs Steelman, grounded in web search.",
+  "type": "module",
+  "bin": {
+    "crossfire-mcp": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "claude-code",
+    "ai-debate",
+    "adversarial",
+    "multi-llm",
+    "multi-model",
+    "openai",
+    "gemini",
+    "llm-orchestration",
+    "developer-tools",
+    "decision-making"
+  ],
+  "author": "Robert Grzesik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/grzesir/crossfire-mcp"
+  },
+  "homepage": "https://github.com/grzesir/crossfire-mcp",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "openai": "^4.80.0",
+    "@google/generative-ai": "^0.21.0",
+    "zod": "^3.24.0"
+  }
+}
