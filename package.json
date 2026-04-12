@@ -1,13 +1,14 @@
 {
   "name": "debate-mcp",
-  "version": "1.0.0",
-  "description": "MCP server that stress-tests your decisions with adversarial AI debate. GPT vs Gemini, Skeptic vs Steelman, grounded in web search.",
+  "version": "4.0.0",
+  "description": "Three thinking tools for Claude Code: debate (adversarial critique), reframe (problem reframing), and diverge (divergent idea generation). Multi-model with web search grounding.",
   "type": "module",
   "bin": {
     "debate-mcp": "./index.js"
   },
   "files": [
     "index.js",
+    "run.sh",
     "README.md",
     "LICENSE"
   ],
@@ -24,7 +25,11 @@
     "gemini",
     "llm-orchestration",
     "developer-tools",
-    "decision-making"
+    "decision-making",
+    "divergent-thinking",
+    "reframe",
+    "brainstorm",
+    "creativity"
   ],
   "author": "Robert Grzesik",
   "license": "MIT",

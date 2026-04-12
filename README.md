@@ -1,180 +1,166 @@
-# Debate MCP
+# Thinking Tools MCP
 
-**Stress-test your decisions before you commit.** An MCP server that runs adversarial AI debates between frontier models, grounded in live web search.
-
-Most AI tools optimize for consensus. Debate MCP optimizes for **finding where your plan breaks.**
+**Three thinking tools that help you make better decisions.** An MCP server for Claude Code with adversarial debate, problem reframing, and divergent idea generation — all grounded in live web search.
 
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/debate-mcp)](https://www.npmjs.com/package/debate-mcp)
 
-## How It Works
+## The Pipeline
+
+```
+reframe → diverge → debate
+  (see)    (imagine)  (stress-test)
+```
+
+Use one tool alone, or chain all three for hard problems.
+
+## Tools
+
+### `debate` — Stress-test your decisions
+Multi-model adversarial critique. Sends your problem to GPT (Skeptic) and Gemini (Steelman) for independent analysis, then anonymized cross-examination. Grounded with Google Search evidence. Claude synthesizes the final recommendation.
+
+**Cost:** ~$0.15-0.25 per run (GPT + Gemini + Google Search)
 
 ```
 You describe your plan
-        |
+        │
         v
-  [Web Search] -- gathers current facts, laws, regulations
-        |
+  [Web Search] ── gathers current facts, laws, data
+        │
         v
-  +-----------+          +-----------+
-  |  SKEPTIC  |          | STEELMAN  |
-  |  (GPT)    |          | (Gemini)  |
-  |           |          |           |
-  | Attacks   |          | Finds the |
-  | your plan |          | strongest |
-  | ruthlessly|          | version,  |
-  |           |          | then      |
-  |           |          | stress-   |
-  |           |          | tests it  |
-  +-----------+          +-----------+
-        |    Round 2: they     |
-        |    read each other   |
-        |    (anonymized) and  |
-        +--- argue back -------+
-                  |
-                  v
-        [Structured synthesis]
-        Recommendation + Crux +
-        What Would Falsify +
-        Unresolved disagreements
+  ┌──────────┐          ┌──────────┐
+  │ SKEPTIC  │          │ STEELMAN │
+  │  (GPT)   │          │ (Gemini) │
+  │          │          │          │
+  │ Attacks  │          │ Finds    │
+  │ your plan│          │ strongest│
+  │ ruthlessly│         │ version, │
+  │          │          │ then     │
+  │          │          │ stress-  │
+  │          │          │ tests it │
+  └──────────┘          └──────────┘
+        │    Round 2: they     │
+        │    read each other   │
+        │    (anonymized) and  │
+        │    cross-examine     │
+        v                      v
+  ┌────────────────────────────────┐
+  │  Claude synthesizes, forced   │
+  │  to preserve disagreements    │
+  └────────────────────────────────┘
 ```
+
+**Use when:** "What am I missing?", "Stress-test this", "Is this a good idea?", high-stakes decisions
+
+### `reframe` — See your problem differently
+Takes a stuck situation and shows it from 5-6 different angles using thinking operators: invert incentives, flip the customer, shift scale, dissolve the problem, change the constraint, and more. Evidence-grounded via Google Search, then Claude generates the reframes.
+
+**Cost:** ~$0.05 per run (Google Search only — Claude generates the output)
+
+**Use when:** Going in circles, "What am I not seeing?", "Help me think about this differently"
+
+### `diverge` — Generate non-obvious ideas
+Produces 20 ideas in 3 waves — obvious (5), adjacent (10), wild (5) — using cross-domain analogy and constraint inversion. Surfaces the 3-5 non-obvious ideas worth testing with 72-hour scrappy tests. Evidence-grounded, Claude generates.
+
+**Cost:** ~$0.05 per run (Google Search only — Claude generates the output)
+
+**Use when:** "Give me ideas", "What could we try?", "Think outside the box", "Brainstorm this"
 
 ## Quick Start
 
-**1. Install**
-```bash
-npx debate-mcp
-```
+### 1. Get API keys
 
-**2. Add to Claude Code**
-```bash
-claude mcp add debate npx debate-mcp \
-  -e OPENAI_API_KEY=sk-... \
-  -e GEMINI_API_KEY=AI...
-```
+- **OpenAI** — [platform.openai.com](https://platform.openai.com)
+- **Google AI** — [aistudio.google.com](https://aistudio.google.com)
 
-**3. Use it**
-
-Just tell Claude: *"debate this"*, *"what am I missing"*, *"stress-test this plan"*, or *"is this the right call"*.
-
-> [!TIP]
-> You can also trigger it with `domain` and `current_leaning` for targeted debates:
-> *"Debate this as a tax attorney. I'm leaning toward electing S-Corp."*
-
-## What Makes This Different
-
-| Feature | Why it matters |
-|---------|---------------|
-| **Asymmetric roles** | One model attacks (Skeptic), one defends then stress-tests (Steelman). Research shows this outperforms giving both models the same prompt. |
-| **Anonymized cross-examination** | In Round 2, models see each other's work labeled "another analyst" to prevent identity bias. Based on NeurIPS 2025 research. |
-| **Web search grounding** | Before the debate, the server searches for current facts, laws, and regulations. Both models receive this as VERIFIED evidence and must flag ungrounded claims as UNVERIFIED. |
-| **Confirmation bias attack** | Tell it what you're leaning toward. The Skeptic will specifically attack that leaning. |
-| **Domain expertise** | Pass `domain: "tax attorney"` or `"systems architect"` to make both analysts domain-specific. |
-| **Constrained synthesis** | The output forces a structured format: Recommendation, Crux of Disagreement, What Would Falsify, Risk of Acting vs Waiting. Prevents AI from smoothing real disagreements into false consensus. |
-
-## Example
-
-**Input:** *"Should we elect S-Corp status? Net profit $40K, based in NYC."*
-**Domain:** `tax attorney`
-**Current leaning:** *"I think S-Corp will save on self-employment tax"*
-
-**What happens:**
-1. Web search pulls current NYC tax rates, QBI rules, IRS thresholds
-2. Skeptic leads with: *"At $40K net profit in NYC, S-Corp election is mathematically guaranteed to lose you money"* and explains exactly why
-3. Steelman finds the strongest case for S-Corp, then stress-tests it against NYC-specific tax penalties
-4. Cross-examination: Skeptic concedes the QBI interaction point, Steelman concedes the compliance cost erasure
-5. Synthesis: **Don't elect. Here's the specific profit threshold where it flips.**
-
-## Configuration
-
-### Environment Variables
-
-**Required (at minimum):**
-
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | API key for the Skeptic model (OpenAI by default) |
-| `GEMINI_API_KEY` | API key for the Steelman model (Gemini by default) |
-
-**Model configuration:**
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SKEPTIC_MODEL` | `gpt-5.4` | Model for the Skeptic role |
-| `SKEPTIC_BASE_URL` | OpenAI default | Base URL for the Skeptic API (change to use Grok, Groq, Mistral, etc.) |
-| `STEELMAN_MODEL` | `gemini-3.1-pro-preview` | Model for the Steelman role |
-| `STEELMAN_PROVIDER` | `gemini` | Set to `openai` to use any OpenAI-compatible API for Steelman |
-| `STEELMAN_BASE_URL` | - | Base URL when using `STEELMAN_PROVIDER=openai` |
-| `STEELMAN_API_KEY` | Falls back to `GEMINI_API_KEY` | API key when using `STEELMAN_PROVIDER=openai` |
-| `CALL_TIMEOUT_MS` | `90000` | Timeout per API call (ms) |
-
-### Use Any Model Provider
-
-The Skeptic role works with **any OpenAI-compatible API** out of the box. Just change the base URL:
+### 2. Clone and install
 
 ```bash
-# Grok (xAI)
-SKEPTIC_BASE_URL=https://api.x.ai/v1 SKEPTIC_MODEL=grok-3 OPENAI_API_KEY=xai-...
-
-# Groq
-SKEPTIC_BASE_URL=https://api.groq.com/openai/v1 SKEPTIC_MODEL=llama-4-scout OPENAI_API_KEY=gsk_...
-
-# Ollama (local, free)
-SKEPTIC_BASE_URL=http://localhost:11434/v1 SKEPTIC_MODEL=llama3 OPENAI_API_KEY=ollama
-
-# Mistral
-SKEPTIC_BASE_URL=https://api.mistral.ai/v1 SKEPTIC_MODEL=mistral-large OPENAI_API_KEY=...
+git clone https://github.com/grzesir/debate-mcp.git
+cd debate-mcp
+npm install
 ```
 
-The Steelman role uses Gemini by default (for Google Search grounding). To use a different provider, set `STEELMAN_PROVIDER=openai` and configure the base URL.
+### 3. Set API keys
 
-### MCP Configuration (`.mcp.json`)
+Either set environment variables directly:
+```bash
+export OPENAI_API_KEY="sk-..."
+export GEMINI_API_KEY="AI..."
+```
+
+Or create a `.env` file in the project directory:
+```
+OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=AI...
+```
+
+### 4. Add to Claude Code
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
-    "debate": {
-      "command": "npx",
-      "args": ["-y", "debate-mcp"],
-      "env": {
-        "OPENAI_API_KEY": "sk-...",
-        "GEMINI_API_KEY": "AI..."
-      }
+    "thinking-tools": {
+      "command": "bash",
+      "args": ["/path/to/debate-mcp/run.sh"]
     }
   }
 }
 ```
 
-> [!NOTE]
-> **Bring your own API keys.** Debate MCP calls OpenAI and Google APIs directly. You are responsible for your own API usage and costs. A typical debate uses ~20,000-30,000 tokens across both providers.
+Restart Claude Code. You'll see `debate`, `reframe`, and `diverge` available.
 
-## Tool Parameters
+## Logging & Cost Tracking
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `context` | Yes | The plan, decision, or situation to debate. Include all relevant details. |
-| `question` | No | Specific question to focus the debate on. |
-| `domain` | No | Domain expertise: `"tax attorney"`, `"systems architect"`, `"financial advisor"`, etc. |
-| `current_leaning` | No | What you're leaning toward. The Skeptic attacks this to counter confirmation bias. |
+Every tool invocation is automatically saved to `logs/`:
+- **Markdown files** — human-readable transcripts with YAML frontmatter
+- **`index.jsonl`** — machine-queryable index for spend tracking
 
-## The Research Behind It
+```bash
+# Total spend
+jq -s 'map(.cost_usd) | add' logs/index.jsonl
 
-Debate MCP's design is based on peer-reviewed research on multi-agent debate:
+# Spend by tool
+jq -s 'group_by(.tool) | map({tool: .[0].tool, cost: (map(.cost_usd) | add), runs: length})' logs/index.jsonl
 
-- **Asymmetric roles** outperform identical prompts (*"Peacemaker or Troublemaker: How Sycophancy Shapes Multi-Agent Debate"*, 2025)
-- **Anonymized cross-examination** prevents identity bias (*"When Identity Skews Debate"*, NeurIPS 2025)
-- **Steelmanning before disagreeing** forces genuine engagement (*Kahneman's Adversarial Collaboration framework*)
-- **Re-stating the original question each round** prevents context drift (*"Talk Isn't Always Cheap"*, ICML 2025)
-- **Caller-model synthesis** avoids positional commitment bias from debaters (*"Auditing Multi-Agent LLM Reasoning Trees"*, 2025)
-- **Ray Dalio's triangulation method**: get independent expert opinions, map convergence and divergence, then decide
+# All debates
+jq -s 'map(select(.tool=="debate"))' logs/index.jsonl
+```
 
-## When To Use It
+## Configuration
 
-**Good for:** Taxes, legal decisions, financial planning, business strategy, architecture choices, investment analysis, contract terms, hiring decisions, production deployments.
+All tunable via environment variables in `run.sh`:
 
-**Not for:** Simple coding tasks, quick lookups, routine bug fixes, or questions with obvious answers.
+| Variable | Default | Description |
+|---|---|---|
+| `GPT_MODEL` | `gpt-5.4` | Model for debate Skeptic |
+| `GEMINI_MODEL` | `gemini-3.1-pro-preview` | Model for Steelman + evidence |
+| `GPT_MAX_TOKENS` | `8192` | Max output tokens for GPT |
+| `DEBATE_LOG_DIR` | `./logs` | Where to write logs |
+| `CALL_TIMEOUT_MS` | `90000` | Timeout per API call |
+
+Pricing defaults (for cost tracking):
+
+| Variable | Default | Description |
+|---|---|---|
+| `GPT_INPUT_PRICE` | `3.00` | $/1M input tokens |
+| `GPT_OUTPUT_PRICE` | `15.00` | $/1M output tokens |
+| `GEMINI_INPUT_PRICE` | `2.00` | $/1M input tokens |
+| `GEMINI_OUTPUT_PRICE` | `12.00` | $/1M output tokens |
+| `GROUNDING_COST_PER_CALL` | `0.035` | Google Search per call |
+
+## Design
+
+**debate** runs GPT and Gemini in parallel with asymmetric roles — Skeptic (attack) and Steelman (strongest version + stress test). Round 2 uses anonymized cross-examination (research shows identity bias degrades debate quality). Claude synthesizes but is forced to preserve disagreements. Based on research from Karpathy's LLM Council, Perplexity Model Council, and NeurIPS/ICML debate protocol papers.
+
+**reframe** uses a library of 15 thinking operators (invert incentives, flip the customer, shift scale, dissolve the problem, etc.) selected dynamically based on your specific problem.
+
+**diverge** uses the Wave method (obvious → adjacent → wild) with cross-domain analogy and constraint inversion — techniques backed by creativity research (Guilford, Torrance, De Bono, IDEO).
+
+**reframe and diverge** gather web evidence via Gemini + Google Search, then return structured instructions that Claude follows. Only the evidence search costs money — the creative generation is done by whatever model is already running your session.
 
 ## License
 
 MIT
-
