@@ -66,21 +66,25 @@ function withTimeout(promise, ms) {
 
 // --- Asymmetric Role Prompts ---
 
-const SKEPTIC_BASE = `You are a Principled Skeptic hired to prevent costly mistakes.
+const SKEPTIC_BASE = `Describe the strongest case that the plan below fails. Write in a direct, analytical style.
 
-Your approach:
-1. Lead with the biggest problem. Never open with praise or agreement.
-2. For every major assumption, ask: "What if this is wrong? What happens then?"
-3. Identify the #1 thing most likely to cause failure. Be specific about consequences.
-4. Name specific risks with specific consequences. Never say "this could be risky" without saying what exactly goes wrong.
-5. Find what's missing that nobody is thinking about.
-6. When you disagree, state your position and what evidence would change your mind.
-7. Maintain your position when evidence supports it. Do not back down to be agreeable.
-8. For each major criticism, suggest a concrete alternative.
-9. Rate your confidence for each major claim: HIGH, MEDIUM, or LOW.
-10. When citing facts, distinguish between VERIFIED (from provided evidence/search results) and UNVERIFIED (from your training data). Flag any claim you are not certain about.
+Your analysis MUST include these sections — fill every one:
 
-Be direct. No hedging. No filler. No "it might be worth considering."`;
+1. FATAL FLAW: The single biggest reason this plan fails. Name it in one sentence.
+2. FAILURE MECHANISM: Exactly how that flaw causes failure. Be specific about the chain of events.
+3. FAILURE TIMELINE: When does the failure become visible? What are the earliest warning signs?
+4. HIDDEN DEPENDENCIES: At least 3 unstated assumptions that must be true for this plan to work.
+5. KILL SHOT: One specific piece of evidence that, if discovered, would prove this plan is doomed.
+6. IMPACT EXPOSURE: Quantify the consequence in domain-appropriate units (cost, time delay, user loss, reliability drop, opportunity cost — whatever fits the situation). Ranges are acceptable; vagueness is not.
+7. MINIMUM SALVAGE: The smallest change that would materially reduce the fatal flaw.
+8. CONFIDENCE: Rate your confidence in this bear case (0-100) with a one-sentence justification.
+
+Constraints:
+- Lead with the biggest problem. Never open with praise, agreement, or summary.
+- No "on the other hand." You are making the case AGAINST.
+- Name specific risks with specific consequences.
+- When citing facts, distinguish VERIFIED (from provided evidence) from UNVERIFIED (from training data).
+- If a quantity is uncertain, give a range and state what drives the uncertainty.`;
 
 const STEELMAN_BASE = `You are a Steelman Analyst. Your job is to find the strongest version of every argument, then stress-test it.
 
@@ -100,13 +104,10 @@ Be thorough but concise. No filler. Every sentence should carry information.`;
 function buildSkepticPrompt(domain, currentLeaning) {
   let prompt = SKEPTIC_BASE;
   if (domain) {
-    prompt = prompt.replace(
-      "You are a Principled Skeptic hired to prevent costly mistakes.",
-      `You are a senior ${domain} operating as a Principled Skeptic, hired to prevent costly mistakes. Apply your deep domain expertise to this analysis.`
-    );
+    prompt = `You are a senior ${domain}.\n\n${prompt}`;
   }
   if (currentLeaning) {
-    prompt += `\n\nCRITICAL: The decision-maker is currently leaning toward: "${currentLeaning}". Your PRIMARY job is to ruthlessly stress-test this specific leaning. Find every reason it could be wrong. Challenge the assumptions behind it. Present the strongest case for the opposite direction. The decision-maker hired you specifically to prevent confirmation bias.`;
+    prompt += `\n\nCRITICAL FOCUS: The decision-maker is currently leaning toward: "${currentLeaning}". Your FATAL FLAW and KILL SHOT sections must specifically target this leaning. Find every reason it could be wrong. The decision-maker needs you to counter their confirmation bias.`;
   }
   return prompt;
 }
@@ -366,7 +367,7 @@ DO NOT USE WHEN:
 - The user just wants something done, not evaluated
 - Every recommendation (costs real money and takes 30-60 seconds)
 
-WORKS BEST IN SEQUENCE: reframe → diverge → debate. Use reframe to see the problem differently, diverge to generate ideas, then debate to stress-test the best one. For high-stakes decisions, use all three.
+PIPELINE: For complex problems, STRONGLY RECOMMEND running the full pipeline: reframe → diverge → debate. Or use the "think" tool which runs all three phases in one call. Don't just run debate alone unless the user specifically asked for critique only.
 
 Returns structured debate transcript. You (Claude) MUST synthesize using the constrained format at the end of the transcript. Do not free-form summarize.`;
 
@@ -680,9 +681,9 @@ DO NOT USE WHEN:
 - User has ideas and needs them critiqued (use debate)
 - Simple questions with clear answers
 
-WORKS BEST IN SEQUENCE: reframe → diverge → debate. Reframe shows new angles, diverge generates ideas from those angles, debate stress-tests the best ones.
+PIPELINE: For complex problems, STRONGLY RECOMMEND using the "think" tool instead (runs all phases in one call). If using reframe alone, follow up with diverge → debate for best results.
 
-Returns 5-6 reframes. You (Claude) should help the user pick which reframe(s) feel most promising, then optionally feed those into diverge.`;
+Returns evidence + instructions. You (Claude) generate the reframes, then help the user pick which feel most promising and feed those into diverge.`;
 
 server.tool(
   "reframe",
@@ -840,9 +841,9 @@ DO NOT USE WHEN:
 - Simple tasks with known solutions
 - User wants a single recommendation, not a menu of options
 
-WORKS BEST IN SEQUENCE: reframe → diverge → debate. Reframe reveals the right angle, diverge generates 20 ideas from that angle, debate stress-tests the best ones.
+PIPELINE: For complex problems, STRONGLY RECOMMEND using the "think" tool instead (runs all phases in one call). If using diverge alone, follow up with debate to stress-test the best idea.
 
-Returns 20 ideas across 3 waves plus 3-5 highlighted top picks with 72-hour tests. You (Claude) should help the user evaluate the top picks and optionally send the most promising one to debate for stress-testing.`;
+Returns evidence + instructions. You (Claude) generate the 20 ideas and top picks, then help the user evaluate and optionally send the best one to debate.`;
 
 server.tool(
   "diverge",
@@ -925,6 +926,132 @@ server.tool(
       has_constraints: !!constraints,
       has_avoid: !!avoid,
       has_reframe: !!reframeAngle,
+      situation_preview: situation.slice(0, 200),
+    });
+    if (logResult.ok) sections.push(`_Logged to: ${logResult.file}_`);
+
+    return { content: [{ type: "text", text: sections.join("\n") }] };
+  }
+);
+
+// =========================================================
+// TOOL 4: THINK
+// Full pipeline in one call. Gathers evidence, then returns
+// structured instructions for Claude to reframe → diverge →
+// synthesize in a single response. The "do everything" tool.
+// =========================================================
+
+const THINK_DESCRIPTION = `Full thinking pipeline in one call. Gathers web evidence, then guides you through all three phases: reframe the problem (5-6 angles), generate ideas (20 ideas in 3 waves), and synthesize the best path forward with a structured failure analysis.
+
+USE THIS TOOL WHEN:
+- User says "think about this", "help me figure this out", "I need to think through this", "what should I do about this"
+- Complex problems that would benefit from seeing the problem differently AND generating ideas AND stress-testing
+- User wants the full pipeline (reframe → diverge → debate-style synthesis) without calling 3 separate tools
+- Any time you would have recommended running all 3 tools in sequence
+
+DO NOT USE WHEN:
+- User specifically wants ONLY critique (use debate)
+- User specifically wants ONLY reframing (use reframe)
+- User specifically wants ONLY ideas (use diverge)
+- Simple questions with clear answers
+
+This is the recommended default for complex problems. It costs ~$0.05 (one Google Search call) and Claude does all the thinking.
+
+Returns structured instructions. You (Claude) MUST follow the three phases in order: reframe first, then diverge, then synthesize.`;
+
+server.tool(
+  "think",
+  THINK_DESCRIPTION,
+  {
+    situation: z.string().describe("The problem, challenge, or decision. Include all relevant context — what you've tried, what's not working, what constraints exist, what's at stake. The model only knows what you send it."),
+    focus: z.string().optional().describe("Optional: what specifically to focus on. Narrows all three phases to this angle."),
+    constraints: z.string().optional().describe("Real constraints to respect (budget, timeline, team size, etc.)."),
+    avoid: z.string().optional().describe("Obvious solutions to skip (things already tried or dismissed)."),
+  },
+  async ({ situation, focus, constraints, avoid }) => {
+    const startTime = Date.now();
+    const sections = [];
+    const phases = [];
+    const recordPhase = (phase, result) => {
+      phases.push({
+        phase, model: result.model,
+        input_tokens: result.input_tokens, output_tokens: result.output_tokens,
+        total_tokens: result.total_tokens, cost: result.cost,
+        grounded: result.grounded, ok: result.ok,
+      });
+    };
+    const sumField = (field) => phases.reduce((a, p) => a + (p[field] || 0), 0);
+
+    // Single evidence gathering call — shared across all phases.
+    const evidence = await gatherEvidence(situation, focus);
+    recordPhase("evidence", evidence);
+
+    const evidenceBlock = evidence.ok
+      ? `## Background Research (via Google Search)\n\n${evidence.text}\n`
+      : `_Evidence gathering failed: ${evidence.text}. Proceeding without web research._\n`;
+
+    sections.push(
+      `# THINK: Full Pipeline (reframe → diverge → synthesize)\n`,
+      evidenceBlock,
+      `---\n`,
+      `## Your Task (Claude: complete ALL THREE PHASES in order)\n`,
+      `**SITUATION:** ${situation}`,
+      focus ? `\n**FOCUS:** ${focus}` : "",
+      constraints ? `\n**CONSTRAINTS:** ${constraints}` : "",
+      avoid ? `\n**AVOID:** ${avoid}` : "",
+      evidence.ok ? `\n**EVIDENCE:** Use the research above to ground your analysis.` : "",
+      ``,
+      `### PHASE 1: REFRAME (show the problem from new angles)`,
+      ``,
+      REFRAME_SYSTEM,
+      ``,
+      `Apply 5-6 thinking operators to the situation above. After producing the reframes, pick the 1-2 most promising angles and clearly state which ones you're carrying forward to Phase 2.`,
+      ``,
+      `### PHASE 2: DIVERGE (generate ideas from the best reframe)`,
+      ``,
+      DIVERGE_SYSTEM,
+      ``,
+      `Generate all 20 ideas through the lens of your best reframe from Phase 1. Then pick your Top 3-5.`,
+      ``,
+      `### PHASE 3: SYNTHESIZE (stress-test the best idea)`,
+      ``,
+      `Take your single best idea from Phase 2 and analyze it using this structure:`,
+      ``,
+      `1. **FATAL FLAW:** The single biggest reason this idea fails. One sentence.`,
+      `2. **FAILURE MECHANISM:** How that flaw causes failure.`,
+      `3. **HIDDEN DEPENDENCIES:** At least 3 unstated assumptions.`,
+      `4. **IMPACT EXPOSURE:** Quantify the downside in domain-appropriate units.`,
+      `5. **MINIMUM SALVAGE:** The smallest change that fixes the fatal flaw.`,
+      `6. **CONFIDENCE:** 0-100 that this idea is worth pursuing.`,
+      `7. **RECOMMENDATION:** Given all three phases — the reframes, the 20 ideas, and the stress test — what should the user actually DO? Be specific. Name the first action and the 72-hour test.`,
+      ``,
+    );
+
+    // Log
+    const logRecord = {
+      timestamp: new Date(startTime).toISOString(),
+      duration_ms: Date.now() - startTime,
+      status: evidence.ok ? "success" : "evidence_failed",
+      tokens_input: sumField("input_tokens"),
+      tokens_output: sumField("output_tokens"),
+      tokens: sumField("total_tokens"),
+      cost: sumField("cost"),
+      phases,
+      situation,
+      question: (focus || situation).slice(0, 200),
+    };
+
+    sections.push(
+      `### Evidence Cost`,
+      `  - evidence: ${evidence.input_tokens.toLocaleString()} in / ${evidence.output_tokens.toLocaleString()} out → $${evidence.cost.toFixed(4)}${evidence.grounded ? " (+ grounding)" : ""}`,
+      `  - all thinking phases: **$0 (generated by Claude)**`,
+      ``,
+    );
+
+    const logResult = await writeToolLog("think", logRecord, sections.join("\n"), {
+      has_focus: !!focus,
+      has_constraints: !!constraints,
+      has_avoid: !!avoid,
       situation_preview: situation.slice(0, 200),
     });
     if (logResult.ok) sections.push(`_Logged to: ${logResult.file}_`);
