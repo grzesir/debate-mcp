@@ -376,11 +376,12 @@ server.tool(
   TOOL_DESCRIPTION,
   {
     context: z.string().describe("The FULL context: plan, decision, strategy, or situation. Include ALL relevant details, background, constraints, and stakes. The models only know what you send them."),
-    question: z.string().optional().describe("Specific question to focus the debate. If omitted, models do a general critical analysis."),
+    question: z.string().optional().describe("Specific question to focus the debate. If omitted, models do a general critical analysis. THIS is what gets debated — the original question the user asked about."),
     domain: z.string().optional().describe("Domain expertise to inject into both analysts. Examples: 'tax attorney', 'corporate lawyer', 'financial advisor', 'systems architect', 'investment analyst'. Makes the debate domain-specific rather than generic."),
     current_leaning: z.string().optional().describe("What the user is currently leaning toward. The Skeptic will specifically attack this leaning to counter confirmation bias. Example: 'I think we should go with the S-Corp election'."),
+    additive_context: z.string().optional().describe("OPTIONAL supplementary perspectives from reframe/diverge tools. This is ADDITIVE — the debate is still about the original question, not about this context. Include compressed one-line summaries of reframes or ideas, not raw dumps. The models will treat this as background intelligence, not as the topic being debated."),
   },
-  async ({ context, question, domain, current_leaning }) => {
+  async ({ context, question, domain, current_leaning, additive_context }) => {
     const startTime = Date.now();
     const sections = [];
 
@@ -443,7 +444,15 @@ server.tool(
       ? `\nVERIFIED EVIDENCE (from web search - cite this when making factual claims, mark claims not supported by this evidence as UNVERIFIED):\n${evidencePack}\n\n`
       : "";
 
-    const r1Prompt = `CONTEXT:\n\n${context}${evidenceSection}\nQUESTION: ${focusQuestion}\n\nProvide your analysis. Structure it with clear sections.`;
+    // Prompt anchoring pattern based on Liu et al. TACL 2024 "Lost in the Middle":
+    // Original question at TOP (primacy attention) and BOTTOM (recency attention).
+    // Additive context in the MIDDLE where models naturally pay less attention.
+    // This prevents additive context from becoming the dominant anchor.
+    const additiveSection = additive_context
+      ? `\n--- SUPPLEMENTARY CONTEXT (from prior reframe/diverge analysis — use as background evidence only, do NOT debate these sub-topics) ---\n${additive_context}\n--- END SUPPLEMENTARY CONTEXT ---\n\n`
+      : "";
+
+    const r1Prompt = `ORIGINAL QUESTION (this is what you are debating):\n${focusQuestion}\n\nCONTEXT:\n${context}\n${evidenceSection}${additiveSection}ANCHOR REMINDER — your analysis MUST directly answer this original question:\n${focusQuestion}\n\nProvide your analysis. Structure it with clear sections.`;
 
     const [skepticR1, steelmanR1] = await Promise.all([
       callGPT(r1Prompt, skepticPrompt),
@@ -535,13 +544,17 @@ YOUR PREVIOUS ANALYSIS:
 ANOTHER ANALYST'S ANALYSIS:
 {OTHER_ANALYSIS}
 
+ANTI-SYCOPHANCY RULE: Do NOT agree just to be agreeable. Research shows multi-agent debates collapse into premature consensus when agents prioritize harmony over truth. Maintain your position where evidence supports it. Agreement must be earned with specific evidence, not offered as a courtesy.
+
 RESPOND TO THE OTHER ANALYST. Follow these steps exactly:
 1. STEELMAN: Restate the other analyst's single strongest argument in your own words. Prove you understood it.
-2. CONCEDE: Name anything they caught that you missed. Be honest.
+2. CONCEDE: Name anything they caught that you missed. Be honest — but ONLY concede points with genuine merit.
 3. DISAGREE: For each point of disagreement, state the specific claim you reject and your specific counter-evidence or reasoning. Distinguish VERIFIED facts (from evidence) from UNVERIFIED claims.
-4. UPDATE: State what (if anything) you changed your mind about.
-5. FIRMEST BELIEF: What is the one thing you are most confident about? Rate: HIGH/MEDIUM/LOW.
-6. UNRESOLVED: Name the top 1-2 disagreements that matter most and have not been settled.`;
+4. UPDATE: State what (if anything) you changed your mind about. If nothing, say "I did not change my mind" and explain why.
+5. FIRMEST BELIEF: What is the one thing you are most confident about? Rate: 0-100 with justification.
+6. UNRESOLVED: Name the top 1-2 disagreements that matter most and have not been settled.
+
+ANCHOR REMINDER: Every point must relate back to the ORIGINAL QUESTION: ${focusQuestion}`;
 
     const [skepticR2, steelmanR2] = await Promise.all([
       callGPT(
@@ -936,17 +949,19 @@ server.tool(
 
 // =========================================================
 // TOOL 4: THINK
-// Full pipeline in one call. Gathers evidence, then returns
-// structured instructions for Claude to reframe → diverge →
-// synthesize in a single response. The "do everything" tool.
+// Full pipeline: evidence → reframe (Claude) → diverge
+// (Claude) → compress → REAL debate (GPT + Gemini) on the
+// ORIGINAL question, enriched with reframe/diverge context.
 // =========================================================
 
-const THINK_DESCRIPTION = `Full thinking pipeline in one call. Gathers web evidence, then guides you through all three phases: reframe the problem (5-6 angles), generate ideas (20 ideas in 3 waves), and synthesize the best path forward with a structured failure analysis.
+const THINK_DESCRIPTION = `Full thinking pipeline in one call. Runs all phases: reframe the problem, generate divergent ideas, then run a REAL multi-model adversarial debate (GPT Skeptic + Gemini Steelman) on the ORIGINAL question — enriched with compressed reframe/diverge perspectives.
+
+IMPORTANT: The debate at the end is about the ORIGINAL question, NOT about the reframe or diverge outputs. Reframe and diverge are additive research that feeds into the debate — they don't replace the topic being debated.
 
 USE THIS TOOL WHEN:
 - User says "think about this", "help me figure this out", "I need to think through this", "what should I do about this"
-- Complex problems that would benefit from seeing the problem differently AND generating ideas AND stress-testing
-- User wants the full pipeline (reframe → diverge → debate-style synthesis) without calling 3 separate tools
+- Complex problems that benefit from seeing it differently AND generating ideas AND stress-testing
+- User wants the full pipeline without calling 3 separate tools
 - Any time you would have recommended running all 3 tools in sequence
 
 DO NOT USE WHEN:
@@ -955,20 +970,22 @@ DO NOT USE WHEN:
 - User specifically wants ONLY ideas (use diverge)
 - Simple questions with clear answers
 
-This is the recommended default for complex problems. It costs ~$0.05 (one Google Search call) and Claude does all the thinking.
+Cost: ~$0.25-0.30 per run (evidence + GPT + Gemini for the real adversarial debate). The reframe and diverge phases are free (Claude generates).
 
-Returns structured instructions. You (Claude) MUST follow the three phases in order: reframe first, then diverge, then synthesize.`;
+Returns: Claude's reframes and ideas PLUS a full multi-model debate transcript on the original question. You (Claude) MUST synthesize the debate using the constrained format.`;
 
 server.tool(
   "think",
   THINK_DESCRIPTION,
   {
-    situation: z.string().describe("The problem, challenge, or decision. Include all relevant context — what you've tried, what's not working, what constraints exist, what's at stake. The model only knows what you send it."),
-    focus: z.string().optional().describe("Optional: what specifically to focus on. Narrows all three phases to this angle."),
-    constraints: z.string().optional().describe("Real constraints to respect (budget, timeline, team size, etc.)."),
-    avoid: z.string().optional().describe("Obvious solutions to skip (things already tried or dismissed)."),
+    situation: z.string().describe("The problem, challenge, or decision. Include all relevant context. The model only knows what you send it."),
+    question: z.string().optional().describe("The specific question to answer. This is what gets DEBATED at the end — the original question. If omitted, a general analysis is performed."),
+    domain: z.string().optional().describe("Domain expertise for the debate phase. Examples: 'tax attorney', 'systems architect'."),
+    constraints: z.string().optional().describe("Real constraints to respect."),
+    avoid: z.string().optional().describe("Obvious solutions to skip."),
+    current_leaning: z.string().optional().describe("What you're currently leaning toward. The Skeptic will attack this."),
   },
-  async ({ situation, focus, constraints, avoid }) => {
+  async ({ situation, question, domain, constraints, avoid, current_leaning }) => {
     const startTime = Date.now();
     const sections = [];
     const phases = [];
@@ -982,76 +999,199 @@ server.tool(
     };
     const sumField = (field) => phases.reduce((a, p) => a + (p[field] || 0), 0);
 
-    // Single evidence gathering call — shared across all phases.
-    const evidence = await gatherEvidence(situation, focus);
+    const focusQuestion = question || "Analyze this thoroughly. What should be done? What are the risks? What's missing?";
+
+    // =========================================================
+    // PHASE 0: Evidence Gathering (shared across all phases)
+    // =========================================================
+    const evidence = await gatherEvidence(situation, question);
     recordPhase("evidence", evidence);
 
-    const evidenceBlock = evidence.ok
-      ? `## Background Research (via Google Search)\n\n${evidence.text}\n`
-      : `_Evidence gathering failed: ${evidence.text}. Proceeding without web research._\n`;
+    const evidencePack = evidence.ok ? evidence.text : null;
 
     sections.push(
-      `# THINK: Full Pipeline (reframe → diverge → synthesize)\n`,
-      evidenceBlock,
+      `# THINK: Full Pipeline\n`,
+      `**Original question:** ${focusQuestion}\n`,
+    );
+
+    if (evidencePack) {
+      sections.push(`## Background Research (via Google Search)\n`, `${evidencePack}\n`);
+    }
+
+    // =========================================================
+    // PHASE 1 & 2: Reframe + Diverge (Claude generates)
+    // These are returned as instructions for Claude to fill in.
+    // Claude's output from these phases will be in the conversation,
+    // but the DEBATE below will also receive compressed versions.
+    // =========================================================
+
+    sections.push(
       `---\n`,
-      `## Your Task (Claude: complete ALL THREE PHASES in order)\n`,
-      `**SITUATION:** ${situation}`,
-      focus ? `\n**FOCUS:** ${focus}` : "",
-      constraints ? `\n**CONSTRAINTS:** ${constraints}` : "",
-      avoid ? `\n**AVOID:** ${avoid}` : "",
-      evidence.ok ? `\n**EVIDENCE:** Use the research above to ground your analysis.` : "",
-      ``,
-      `### PHASE 1: REFRAME (show the problem from new angles)`,
+      `## Phase 1: REFRAME (Claude: generate 5-6 reframes of the original question)\n`,
       ``,
       REFRAME_SYSTEM,
       ``,
-      `Apply 5-6 thinking operators to the situation above. After producing the reframes, pick the 1-2 most promising angles and clearly state which ones you're carrying forward to Phase 2.`,
+      `**SITUATION:** ${situation}`,
+      constraints ? `\n**CONSTRAINTS:** ${constraints}` : "",
+      avoid ? `\n**AVOID:** ${avoid}` : "",
+      evidencePack ? `\n**EVIDENCE:** Use the research above.` : "",
       ``,
-      `### PHASE 2: DIVERGE (generate ideas from the best reframe)`,
+      `Apply 5-6 thinking operators. Then pick the 1-2 most promising angles.`,
+      ``,
+      `## Phase 2: DIVERGE (Claude: generate 20 ideas from the best reframe)\n`,
       ``,
       DIVERGE_SYSTEM,
       ``,
-      `Generate all 20 ideas through the lens of your best reframe from Phase 1. Then pick your Top 3-5.`,
+      `Generate 20 ideas through the lens of your best reframe. Then pick Top 3-5.`,
       ``,
-      `### PHASE 3: SYNTHESIZE (stress-test the best idea)`,
+      `## Phase 3: COMPRESS (Claude: prepare additive context for the debate)`,
       ``,
-      `Take your single best idea from Phase 2 and analyze it using this structure:`,
-      ``,
-      `1. **FATAL FLAW:** The single biggest reason this idea fails. One sentence.`,
-      `2. **FAILURE MECHANISM:** How that flaw causes failure.`,
-      `3. **HIDDEN DEPENDENCIES:** At least 3 unstated assumptions.`,
-      `4. **IMPACT EXPOSURE:** Quantify the downside in domain-appropriate units.`,
-      `5. **MINIMUM SALVAGE:** The smallest change that fixes the fatal flaw.`,
-      `6. **CONFIDENCE:** 0-100 that this idea is worth pursuing.`,
-      `7. **RECOMMENDATION:** Given all three phases — the reframes, the 20 ideas, and the stress test — what should the user actually DO? Be specific. Name the first action and the 72-hour test.`,
+      `CRITICAL: Compress your reframe and diverge outputs into a SHORT additive brief. Research shows additive context over ~1,000 tokens causes "context rot" that degrades the debate. Keep it tight:`,
+      `- Top 2 reframes (ONE LINE EACH, max 50 words per line)`,
+      `- Top 3 ideas (ONE LINE EACH, max 50 words per line)`,
+      `- Total compression must be under 500 words`,
+      `- End with: "These are supplementary perspectives. The debate below is about the ORIGINAL QUESTION: ${focusQuestion}"`,
       ``,
     );
 
-    // Log
+    // =========================================================
+    // PHASE 4: REAL DEBATE (GPT Skeptic + Gemini Steelman)
+    // Debates the ORIGINAL question, with compressed reframe/diverge
+    // as additive context. This is the core value.
+    // =========================================================
+
+    const skepticPrompt = buildSkepticPrompt(domain, current_leaning);
+    const steelmanPrompt = buildSteelmanPrompt(domain);
+
+    // Prompt anchoring: original question at TOP and BOTTOM (U-curve attention
+    // pattern from Liu et al. TACL 2024). Evidence and context in the middle.
+    const debatePrompt = [
+      `ORIGINAL QUESTION (this is what you are debating):`,
+      focusQuestion,
+      ``,
+      `CONTEXT:`,
+      situation,
+      evidencePack ? `\nVERIFIED EVIDENCE (from web search):\n${evidencePack}` : "",
+      constraints ? `\nCONSTRAINTS: ${constraints}` : "",
+      ``,
+      `ANCHOR REMINDER — your analysis MUST directly answer this original question:`,
+      focusQuestion,
+      ``,
+      `Provide your analysis. Structure it with clear sections.`,
+    ].join("\n");
+
+    const [skepticR1, steelmanR1] = await Promise.all([
+      callGPT(debatePrompt, skepticPrompt),
+      callGemini(debatePrompt, steelmanPrompt),
+    ]);
+    recordPhase("r1_skeptic", skepticR1);
+    recordPhase("r1_steelman", steelmanR1);
+
+    sections.push(
+      `## Phase 4: DEBATE on the Original Question\n`,
+      `_Models: Analyst A (${GPT_MODEL}, Skeptic${domain ? `, ${domain}` : ""}) | Analyst B (${GEMINI_MODEL}, Steelman${domain ? `, ${domain}` : ""})_`,
+      current_leaning ? `_Current leaning: "${current_leaning}" (Skeptic targets this)_\n` : `\n`,
+      `### Skeptic Analysis\n${skepticR1.text}\n`,
+      `### Steelman Analysis\n${steelmanR1.text}\n`,
+    );
+
+    // Round 2 cross-examination (if both succeeded)
+    if (skepticR1.ok && steelmanR1.ok) {
+      const crossExam = `ORIGINAL QUESTION (re-stated to prevent drift): ${focusQuestion}
+
+ORIGINAL CONTEXT:
+${situation}
+${evidencePack ? `\nVERIFIED EVIDENCE:\n${evidencePack}\n` : ""}
+YOUR PREVIOUS ANALYSIS:
+{MY_ANALYSIS}
+
+ANOTHER ANALYST'S ANALYSIS:
+{OTHER_ANALYSIS}
+
+RESPOND. Follow these steps:
+1. STEELMAN: Restate their single strongest argument.
+2. CONCEDE: What did they catch that you missed?
+3. DISAGREE: Specific claims you reject and why.
+4. UPDATE: What did you change your mind about?
+5. FIRMEST BELIEF: Your highest-confidence conclusion. Rate 0-100.
+6. UNRESOLVED: Top 1-2 unsettled disagreements.`;
+
+      const [skepticR2, steelmanR2] = await Promise.all([
+        callGPT(
+          crossExam.replace("{MY_ANALYSIS}", skepticR1.text).replace("{OTHER_ANALYSIS}", steelmanR1.text),
+          skepticPrompt
+        ),
+        callGemini(
+          crossExam.replace("{MY_ANALYSIS}", steelmanR1.text).replace("{OTHER_ANALYSIS}", skepticR1.text),
+          steelmanPrompt
+        ),
+      ]);
+      recordPhase("r2_skeptic", skepticR2);
+      recordPhase("r2_steelman", steelmanR2);
+
+      sections.push(
+        `### Cross-Examination: Skeptic\n${skepticR2.text}\n`,
+        `### Cross-Examination: Steelman\n${steelmanR2.text}\n`,
+      );
+    }
+
+    // Synthesis instructions
+    sections.push(
+      `---\n`,
+      `## Synthesis Required (Claude: complete this structure)`,
+      ``,
+      `You have completed reframe, diverge, AND a real multi-model debate — all about the ORIGINAL QUESTION: "${focusQuestion}"`,
+      ``,
+      `Synthesize everything using this format:`,
+      ``,
+      `**Recommendation:** [Based on ALL phases — reframes, ideas, and the debate]`,
+      `**Key Agreements:** [Where the debate analysts converged]`,
+      `**Strongest Argument For:** [The single best argument supporting the recommendation]`,
+      `**Strongest Argument Against:** [The single best counter-argument]`,
+      `**Crux:** [The one assumption that determines the right path]`,
+      `**What Would Resolve It:** [Specific evidence or action needed]`,
+      `**72-Hour Test:** [The first concrete action to take this week]`,
+      `**Confidence:** [0-100 with explanation]`,
+      ``,
+    );
+
+    // Cost/token footer
+    const finalizeTotals = () => {
+      return {
+        tokens_input: sumField("input_tokens"),
+        tokens_output: sumField("output_tokens"),
+        tokens: sumField("total_tokens"),
+        cost: sumField("cost"),
+      };
+    };
+    const totals = finalizeTotals();
+
+    const phaseSummary = phases.map(p =>
+      `  - ${p.phase}: ${p.input_tokens.toLocaleString()} in / ${p.output_tokens.toLocaleString()} out → $${p.cost.toFixed(4)}${p.grounded ? " (+ grounding)" : ""}`
+    ).join("\n");
+    sections.push(
+      `### Usage & Cost`,
+      phaseSummary,
+      `  - reframe + diverge + compress: **$0 (generated by Claude)**`,
+      `  - **TOTAL: ${totals.tokens_input.toLocaleString()} input + ${totals.tokens_output.toLocaleString()} output = ${totals.tokens.toLocaleString()} tokens → $${totals.cost.toFixed(4)}**`,
+      ``,
+    );
+
     const logRecord = {
       timestamp: new Date(startTime).toISOString(),
       duration_ms: Date.now() - startTime,
-      status: evidence.ok ? "success" : "evidence_failed",
-      tokens_input: sumField("input_tokens"),
-      tokens_output: sumField("output_tokens"),
-      tokens: sumField("total_tokens"),
-      cost: sumField("cost"),
+      status: (skepticR1.ok || steelmanR1.ok) ? "success" : "debate_failed",
+      ...totals,
       phases,
       situation,
-      question: (focus || situation).slice(0, 200),
+      question: focusQuestion,
     };
 
-    sections.push(
-      `### Evidence Cost`,
-      `  - evidence: ${evidence.input_tokens.toLocaleString()} in / ${evidence.output_tokens.toLocaleString()} out → $${evidence.cost.toFixed(4)}${evidence.grounded ? " (+ grounding)" : ""}`,
-      `  - all thinking phases: **$0 (generated by Claude)**`,
-      ``,
-    );
-
     const logResult = await writeToolLog("think", logRecord, sections.join("\n"), {
-      has_focus: !!focus,
+      has_domain: !!domain,
       has_constraints: !!constraints,
       has_avoid: !!avoid,
+      has_leaning: !!current_leaning,
       situation_preview: situation.slice(0, 200),
     });
     if (logResult.ok) sections.push(`_Logged to: ${logResult.file}_`);
