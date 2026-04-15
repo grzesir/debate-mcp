@@ -1,0 +1,30 @@
+{
+  "version": "5.2.0",
+  "captured_at": "2026-04-15",
+  "fixtures": {
+    "rejection-empty-evidence": {
+      "duration_sec": 0.2,
+      "cost_usd": 0.0,
+      "response_size_bytes": 1270,
+      "status": "pass"
+    },
+    "rejection-oversized-evidence": {
+      "duration_sec": 0.2,
+      "cost_usd": 0.0,
+      "response_size_bytes": 492,
+      "status": "pass"
+    },
+    "valid-typescript-packaging": {
+      "duration_sec": 189.1,
+      "cost_usd": 0.2294,
+      "response_size_bytes": 45456,
+      "status": "pass",
+      "optional_markers_present": ["Phase 1.5: Targeted Verification"]
+    }
+  },
+  "totals": {
+    "fixtures_passed": 3,
+    "fixtures_total": 3,
+    "total_cost_usd": 0.2294
+  }
+}

@@ -499,7 +499,7 @@ const STRUCTURED_FIELD_SHAPE = {
 
 const server = new McpServer({
   name: "debate",
-  version: "5.1.0",
+  version: "5.2.0",
 });
 
 const TOOL_DESCRIPTION = `Full-pipeline thinking + adversarial debate. Runs reframe + diverge + Google-grounded evidence + GPT Skeptic vs Gemini Steelman with anonymized cross-examination, plus a targeted verification round that re-searches any claims the analysts mark UNVERIFIED. Use this whenever the user says "debate", "think about", "stress-test", "what am I missing", or wants a high-stakes decision evaluated. Prefer structured fields (decision_statement, options, key_evidence) and resource_uris — pre-flight grep claude-mem and the user's filesystem and pass relevant findings as key_evidence/resource_uris before calling. Claude MUST synthesize the transcript using the format printed at the end.`;
@@ -532,6 +532,62 @@ server.tool(
     resource_uris,
   }) => {
     const runPipeline = pipeline !== false;
+
+    // =========================================================
+    // PREFLIGHT GATE (v5.2)
+    //
+    // The point: force the caller (Claude) to do the claude-mem +
+    // filesystem + prior-debate-log research BEFORE invoking debate,
+    // not after. The server cannot reach those sources itself — stdio
+    // MCP has no filesystem or MCP-client access beyond its own dir.
+    // So the caller is the only place high-value local context can
+    // be assembled. If we don't gate here, "more research" stays a
+    // vibe instead of an enforced property.
+    //
+    // Also caps key_evidence at KEY_EVIDENCE_MAX items to prevent
+    // the caller from dumping raw grep output — context rot kicks in
+    // hard once prompts pass ~50% of the model's effective window.
+    // =========================================================
+    const KEY_EVIDENCE_MAX = parseInt(process.env.KEY_EVIDENCE_MAX || "12");
+    const looksComplex = !!(decision_statement || (options && options.length > 0));
+    const hasEvidenceSignal = (key_evidence && key_evidence.length > 0)
+      || (resource_uris && resource_uris.length > 0);
+
+    if (looksComplex && !hasEvidenceSignal) {
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "PREFLIGHT REQUIRED — this looks like a complex decision (decision_statement or options provided) but neither `key_evidence` nor `resource_uris` is populated.",
+            "",
+            "Before calling `debate` again, do this research pass in YOUR OWN context (not the server's):",
+            "1. **claude-mem**: search for prior related decisions, conclusions, and work history. Use mcp__plugin_claude-mem_mcp-search__search or smart_search.",
+            "2. **Filesystem grep**: search /Users/robertgrzesik/Documents/Development/ for relevant docs, plans, code, prior debate logs (in mcp_servers/debate/logs/), or project files bearing on the question.",
+            "3. **Prior debate logs**: check mcp_servers/debate/logs/index.jsonl for historical debates on similar topics.",
+            "",
+            "Then compress the findings to 5–12 verbatim quotes and pass them as `key_evidence` (string array), plus the most decision-relevant doc paths as `resource_uris` (file:// URIs). Do NOT paraphrase — use exact quotes. Do NOT exceed " + KEY_EVIDENCE_MAX + " key_evidence items (context rot kicks in above that).",
+            "",
+            "If claude-mem and filesystem genuinely have nothing relevant, pass `key_evidence: [\"(preflight completed; no prior context found in claude-mem or filesystem)\"]` to bypass this gate — the explicit empty is different from the implicit empty and tells the analysts you checked.",
+          ].join("\n"),
+        }],
+      };
+    }
+
+    if (key_evidence && key_evidence.length > KEY_EVIDENCE_MAX) {
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "PREFLIGHT TOO NOISY — `key_evidence` has " + key_evidence.length + " items (max " + KEY_EVIDENCE_MAX + ").",
+            "",
+            "Context rot research (Wang et al. Jan 2026, Chroma Mar 2026) shows model reasoning degrades catastrophically once prompts pass ~40–50% of the effective window. Dumping raw grep output defeats the purpose of structured extraction.",
+            "",
+            "Deduplicate. Keep the " + KEY_EVIDENCE_MAX + " most decision-relevant verbatim quotes. For bulk documents, use `resource_uris` (file://...) instead — the server reads them pass-by-reference without bloating caller context.",
+          ].join("\n"),
+        }],
+      };
+    }
+
     const { contents: resources, errors: resourceErrors } = await readResourceUris(resource_uris);
     const composedContext = composeStructuredContext({
       narrative: context,

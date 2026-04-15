@@ -1,0 +1,35 @@
+{
+  "name": "valid-typescript-packaging",
+  "description": "Canonical valid debate: TypeScript library ESM-only vs dual-mode packaging. Exercises pipeline phases, verification, and R2 cross-exam.",
+  "tool": "debate",
+  "arguments": {
+    "decision_statement": "Should a small TypeScript library default to ESM-only or dual ESM+CJS in 2026",
+    "options": ["ESM-only", "Dual ESM+CJS"],
+    "key_evidence": [
+      "Node 22 LTS supports require(esm) for synchronous CJS->ESM imports",
+      "Most major frameworks (Vite, Next.js, Vitest) are ESM-first",
+      "Some enterprise CI toolchains still ship with CJS-only test runners"
+    ],
+    "current_leaning": "ESM-only",
+    "stakes": "Wrong choice means library users on legacy CJS toolchains either cant install it (ESM-only) or maintainers carry build complexity forever (dual)",
+    "domain": "JavaScript packaging engineer"
+  },
+  "expect": {
+    "status": "success",
+    "markers": [
+      "Phase 0: Evidence",
+      "Pipeline Phase 1: REFRAME",
+      "Pipeline Phase 2: DIVERGE",
+      "Pipeline Phase 3: COMPRESS",
+      "Round 1: Independent Analysis",
+      "Round 2: Cross-Examination",
+      "Synthesis Required",
+      "Usage & Cost"
+    ],
+    "optional_markers": [
+      "Phase 1.5: Targeted Verification"
+    ],
+    "max_cost_usd": 0.35,
+    "max_duration_sec": 240
+  }
+}

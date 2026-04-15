@@ -1,0 +1,31 @@
+{
+  "name": "rejection-oversized-evidence",
+  "description": "key_evidence with more than 12 items should be rejected as context-rot risk.",
+  "tool": "debate",
+  "arguments": {
+    "decision_statement": "test decision",
+    "key_evidence": [
+      "Item 1 verbatim quote",
+      "Item 2 verbatim quote",
+      "Item 3 verbatim quote",
+      "Item 4 verbatim quote",
+      "Item 5 verbatim quote",
+      "Item 6 verbatim quote",
+      "Item 7 verbatim quote",
+      "Item 8 verbatim quote",
+      "Item 9 verbatim quote",
+      "Item 10 verbatim quote",
+      "Item 11 verbatim quote",
+      "Item 12 verbatim quote",
+      "Item 13 verbatim quote",
+      "Item 14 verbatim quote",
+      "Item 15 verbatim quote"
+    ]
+  },
+  "expect": {
+    "status": "rejected",
+    "reject_marker": "PREFLIGHT TOO NOISY",
+    "max_cost_usd": 0.0,
+    "max_duration_sec": 10
+  }
+}

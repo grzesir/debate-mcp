@@ -169,6 +169,24 @@ Pricing defaults (for cost tracking):
 | `GEMINI_OUTPUT_PRICE` | `12.00` | $/1M output tokens |
 | `GROUNDING_COST_PER_CALL` | `0.035` | Google Search per call |
 
+## Benchmarks
+
+A regression harness lives in `benchmarks/`. It runs fixture debates against the server, parses responses, and asserts expected phase markers, cost, and latency are within budget.
+
+```bash
+./benchmarks/run.sh --rejections-only          # free, ~0.4s, verifies preflight gate
+./benchmarks/run.sh --all                      # full suite (~$0.25, ~3 min)
+./benchmarks/run.sh benchmarks/fixtures/valid-typescript-packaging.json
+```
+
+The current baseline lives in `benchmarks/baseline.json` — regenerate it whenever server behavior changes materially. Results are written to `benchmarks/results/last_<fixture>.json`. See `benchmarks/README.md` for fixture format and runner internals.
+
+## Preflight gate (v5.2)
+
+As of v5.2, complex decisions (those with `decision_statement` or `options`) must arrive with populated `key_evidence` or `resource_uris`. A server-side gate fast-fails with a `PREFLIGHT REQUIRED` error if neither is provided, instructing the calling LLM to first grep claude-mem + the user's filesystem and pass findings as structured inputs. A second gate rejects payloads with more than 12 `key_evidence` items (`PREFLIGHT TOO NOISY`) to prevent context-rot from raw grep dumps. Both limits are env-tunable (`KEY_EVIDENCE_MAX`).
+
+This turns the "do more research" intention into an enforced architectural property rather than relying on caller discipline.
+
 ## Design
 
 **debate** runs GPT and Gemini in parallel with asymmetric roles — Skeptic (attack) and Steelman (strongest version + stress test). Round 2 uses anonymized cross-examination (research shows identity bias degrades debate quality). Claude synthesizes but is forced to preserve disagreements. Based on research from Karpathy's LLM Council, Perplexity Model Council, and NeurIPS/ICML debate protocol papers.

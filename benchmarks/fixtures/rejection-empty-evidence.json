@@ -1,0 +1,15 @@
+{
+  "name": "rejection-empty-evidence",
+  "description": "Complex decision (decision_statement + options) with no key_evidence or resource_uris should be rejected by the preflight gate.",
+  "tool": "debate",
+  "arguments": {
+    "decision_statement": "Should we use Redis or Memcached for session storage",
+    "options": ["Redis", "Memcached"]
+  },
+  "expect": {
+    "status": "rejected",
+    "reject_marker": "PREFLIGHT REQUIRED",
+    "max_cost_usd": 0.0,
+    "max_duration_sec": 10
+  }
+}
