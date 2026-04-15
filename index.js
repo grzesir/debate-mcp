@@ -346,42 +346,155 @@ async function writeToolLog(toolName, record, markdownBody, extraIndex = {}) {
 
 // --- MCP Server ---
 
+// --- Structured input helpers ---
+//
+// Philosophy: instead of encouraging callers to "dump everything" into a
+// single context blob (which bloats the caller's prompt AND triggers
+// "lost in the middle" / context rot in the analyst models), we accept
+// STRUCTURED fields and file:// resource URIs and compose the payload
+// on the server side. This keeps the caller's token budget intact and
+// gives the analysts high-signal, anchored context instead of a wall of text.
+//
+// The context rot research (Liu et al. 2024, Chroma 2025) shows attention
+// drops sharply for information buried in the middle of long prompts.
+// Structured extraction forces the caller to pull the decisive facts into
+// specific, named buckets where the analysts can actually find them.
+
+const MAX_RESOURCE_BYTES = parseInt(process.env.MAX_RESOURCE_BYTES || "500000");
+
+async function readResourceUris(uris = []) {
+  const contents = [];
+  const errors = [];
+  if (!uris || uris.length === 0) return { contents, errors };
+  let totalBytes = 0;
+  for (const uri of uris) {
+    try {
+      if (!uri.startsWith("file://")) {
+        errors.push(`${uri}: only file:// URIs are supported`);
+        continue;
+      }
+      const filePath = fileURLToPath(uri);
+      const stat = await fs.stat(filePath);
+      if (stat.size > MAX_RESOURCE_BYTES) {
+        errors.push(`${uri}: ${stat.size} bytes exceeds per-file cap ${MAX_RESOURCE_BYTES}`);
+        continue;
+      }
+      if (totalBytes + stat.size > MAX_RESOURCE_BYTES) {
+        errors.push(`${uri}: total resource budget of ${MAX_RESOURCE_BYTES} bytes exhausted`);
+        continue;
+      }
+      const text = await fs.readFile(filePath, "utf8");
+      contents.push({ uri, path: filePath, text });
+      totalBytes += stat.size;
+    } catch (err) {
+      errors.push(`${uri}: ${err.message}`);
+    }
+  }
+  return { contents, errors };
+}
+
+function composeStructuredContext({
+  narrative,
+  decision_statement,
+  options,
+  constraints_list,
+  key_evidence,
+  unresolved_uncertainties,
+  stakes,
+  resources,
+  resourceErrors,
+}) {
+  const parts = [];
+  if (decision_statement) parts.push(`## Decision under evaluation\n${decision_statement}`);
+  if (options && options.length) {
+    parts.push(`## Options\n${options.map((o, i) => `${i + 1}. ${o}`).join("\n")}`);
+  }
+  if (constraints_list && constraints_list.length) {
+    parts.push(`## Constraints\n${constraints_list.map(c => `- ${c}`).join("\n")}`);
+  }
+  if (key_evidence && key_evidence.length) {
+    parts.push(`## Key evidence (verbatim, not summarized)\n${key_evidence.map(e => `- ${e}`).join("\n")}`);
+  }
+  if (unresolved_uncertainties && unresolved_uncertainties.length) {
+    parts.push(`## Unresolved uncertainties\n${unresolved_uncertainties.map(u => `- ${u}`).join("\n")}`);
+  }
+  if (stakes) parts.push(`## Stakes\n${stakes}`);
+  if (narrative) parts.push(`## Narrative context\n${narrative}`);
+  if (resources && resources.length) {
+    parts.push(`## Attached documents (fetched by server from file:// URIs)`);
+    for (const r of resources) {
+      parts.push(`### ${r.uri}\n\`\`\`\n${r.text}\n\`\`\``);
+    }
+  }
+  if (resourceErrors && resourceErrors.length) {
+    parts.push(`## Resource read errors\n${resourceErrors.map(e => `- ${e}`).join("\n")}`);
+  }
+  return parts.join("\n\n");
+}
+
+const STRUCTURED_FIELD_SHAPE = {
+  decision_statement: z.string().optional().describe("One-sentence statement of the exact decision or recommendation being evaluated. Prefer this over narrative prose."),
+  options: z.array(z.string()).optional().describe("The specific options or paths under consideration, one per array entry. Don't summarize — list them."),
+  constraints_list: z.array(z.string()).optional().describe("Hard constraints the decision must respect (budget, time, legal, technical, stakeholder). One per entry."),
+  key_evidence: z.array(z.string()).optional().describe("Direct verbatim quotes, facts, or numbers the analysts must reason about. Paste exact text — do not paraphrase. Each entry should be decision-relevant."),
+  unresolved_uncertainties: z.array(z.string()).optional().describe("Open questions you don't yet have answers to. Steers the analysts toward the real cruxes instead of strawmanning settled facts."),
+  stakes: z.string().optional().describe("What happens if this decision is wrong. Calibrates how hard the Skeptic attacks."),
+  resource_uris: z.array(z.string()).optional().describe("file:// URIs the server will read and inject verbatim into the analyst prompts. Use this instead of pasting long documents — preserves full fidelity without bloating the caller's context window. Per-file and total caps apply (default 500KB)."),
+};
+
 const server = new McpServer({
-  name: "thinking-tools",
-  version: "4.0.0",
+  name: "debate",
+  version: "5.0.0",
 });
 
-const TOOL_DESCRIPTION = `Multi-model adversarial debate with web search grounding. Gathers evidence via Google Search, then sends context to GPT-5.4 (Skeptic) and Gemini 3.1 Pro (Steelman) for independent critique and anonymized cross-examination. Returns structured debate transcript for you to synthesize.
-
-USE THIS TOOL WHEN:
-- User says "debate this", "challenge this", "get other opinions", "what am I missing", "is this right", "stress-test this", "play devil's advocate", "poke holes in this", "sanity check this", "check my thinking"
-- High-consequence or irreversible decisions: taxes, legal, financial planning, investment strategy, business decisions, health, production deployments, contracts, architecture with lock-in
-- You are uncertain about a complex recommendation with significant tradeoffs
-- User expresses doubt or skepticism ("I'm not sure about...", "this feels risky", "what could go wrong")
-- Complex tradeoffs with no clear winner where reasonable experts would disagree
-
-DO NOT USE WHEN:
-- Simple coding tasks, bug fixes, or routine file operations
-- Questions with clear, well-established answers
-- Quick factual lookups or calculations
-- The user just wants something done, not evaluated
-- Every recommendation (costs real money and takes 30-60 seconds)
-
-PIPELINE: For complex problems, STRONGLY RECOMMEND running the full pipeline: reframe → diverge → debate. Or use the "think" tool which runs all three phases in one call. Don't just run debate alone unless the user specifically asked for critique only.
-
-Returns structured debate transcript. You (Claude) MUST synthesize using the constrained format at the end of the transcript. Do not free-form summarize.`;
+const TOOL_DESCRIPTION = `Adversarial multi-model critique (GPT Skeptic + Gemini Steelman) of a high-stakes decision, with Google Search grounding and anonymized cross-examination. Use for tax/legal/financial/architecture/strategy calls when you need to know what you're missing. Prefer structured fields (decision_statement, options, key_evidence) or resource_uris over raw context dumps — they protect against context rot in the analyst models. Claude MUST synthesize the transcript using the format printed at the end.`;
 
 server.tool(
   "debate",
   TOOL_DESCRIPTION,
   {
-    context: z.string().describe("The FULL context: plan, decision, strategy, or situation. Include ALL relevant details, background, constraints, and stakes. The models only know what you send them."),
-    question: z.string().optional().describe("Specific question to focus the debate. If omitted, models do a general critical analysis. THIS is what gets debated — the original question the user asked about."),
-    domain: z.string().optional().describe("Domain expertise to inject into both analysts. Examples: 'tax attorney', 'corporate lawyer', 'financial advisor', 'systems architect', 'investment analyst'. Makes the debate domain-specific rather than generic."),
-    current_leaning: z.string().optional().describe("What the user is currently leaning toward. The Skeptic will specifically attack this leaning to counter confirmation bias. Example: 'I think we should go with the S-Corp election'."),
-    additive_context: z.string().optional().describe("OPTIONAL supplementary perspectives from reframe/diverge tools. This is ADDITIVE — the debate is still about the original question, not about this context. Include compressed one-line summaries of reframes or ideas, not raw dumps. The models will treat this as background intelligence, not as the topic being debated."),
+    context: z.string().optional().describe("Narrative context for the decision. Optional if you provide structured fields (decision_statement/options/key_evidence) or resource_uris. Prefer structured fields over long prose — raw dumps trigger context rot in the analyst models."),
+    question: z.string().optional().describe("Specific question to focus the debate. If omitted, models do a general critical analysis."),
+    domain: z.string().optional().describe("Domain expertise to inject into both analysts. Examples: 'tax attorney', 'systems architect', 'financial advisor'."),
+    current_leaning: z.string().optional().describe("What the user is currently leaning toward. The Skeptic will specifically attack this leaning to counter confirmation bias."),
+    additive_context: z.string().optional().describe("Supplementary perspectives from reframe/diverge tools. Compressed one-line summaries only, not raw dumps — treated as background intelligence, not as the topic being debated."),
+    ...STRUCTURED_FIELD_SHAPE,
   },
-  async ({ context, question, domain, current_leaning, additive_context }) => {
+  async ({
+    context,
+    question,
+    domain,
+    current_leaning,
+    additive_context,
+    decision_statement,
+    options,
+    constraints_list,
+    key_evidence,
+    unresolved_uncertainties,
+    stakes,
+    resource_uris,
+  }) => {
+    const { contents: resources, errors: resourceErrors } = await readResourceUris(resource_uris);
+    const composedContext = composeStructuredContext({
+      narrative: context,
+      decision_statement,
+      options,
+      constraints_list,
+      key_evidence,
+      unresolved_uncertainties,
+      stakes,
+      resources,
+      resourceErrors,
+    });
+    if (!composedContext) {
+      return {
+        content: [{
+          type: "text",
+          text: "Error: debate requires at least one of `context`, `decision_statement`, `options`, `key_evidence`, or `resource_uris`.",
+        }],
+      };
+    }
+    context = composedContext;
     const startTime = Date.now();
     const sections = [];
 
@@ -680,32 +793,27 @@ Be specific to the actual situation. Do not produce generic reframes. Every refr
 
 Do NOT solve the problem. Do NOT recommend actions. Only show new angles.`;
 
-const REFRAME_DESCRIPTION = `Problem reframing tool. Takes a stuck situation and shows it from 5-6 completely different angles using thinking operators (invert incentives, flip the customer, shift scale, dissolve the problem, etc.). Does NOT solve the problem — changes how you see it so new solutions become visible.
-
-USE THIS TOOL WHEN:
-- User is stuck and keeps circling the same ideas
-- User says "I don't know what to do", "I'm going in circles", "help me think about this differently", "what am I not seeing"
-- Before using diverge — reframing first produces much better idea generation
-- The problem feels unsolvable (it might be the wrong problem)
-- User has tried obvious solutions and they haven't worked
-
-DO NOT USE WHEN:
-- User already knows the problem clearly and needs ideas (use diverge)
-- User has ideas and needs them critiqued (use debate)
-- Simple questions with clear answers
-
-PIPELINE: For complex problems, STRONGLY RECOMMEND using the "think" tool instead (runs all phases in one call). If using reframe alone, follow up with diverge → debate for best results.
-
-Returns evidence + instructions. You (Claude) generate the reframes, then help the user pick which feel most promising and feed those into diverge.`;
+const REFRAME_DESCRIPTION = `Reframes a stuck situation through 5-6 thinking operators (invert incentives, flip the customer, dissolve the problem, change the constraint, etc.). Use when the user is going in circles or the obvious solutions haven't worked. Returns research + a reframe template Claude fills in.`;
 
 server.tool(
   "reframe",
   REFRAME_DESCRIPTION,
   {
-    situation: z.string().describe("The stuck situation, problem, or challenge. Include all relevant context — what you've tried, what's not working, what constraints exist. The model only knows what you send it."),
-    focus: z.string().optional().describe("Optional: what specifically to reframe. E.g., 'our pricing model' or 'why customers churn after month 2'. If omitted, the whole situation is reframed."),
+    situation: z.string().describe("The stuck situation, problem, or challenge. Include what you've tried and what constraints exist."),
+    focus: z.string().optional().describe("Optional: what specifically to reframe (e.g., 'our pricing model'). If omitted, the whole situation is reframed."),
+    resource_uris: z.array(z.string()).optional().describe("file:// URIs the server will read and append to the situation. Per-file and total caps apply (default 500KB)."),
   },
-  async ({ situation, focus }) => {
+  async ({ situation, focus, resource_uris }) => {
+    const { contents: reframeResources, errors: reframeResourceErrors } = await readResourceUris(resource_uris);
+    if (reframeResources.length) {
+      const resourceBlock = reframeResources
+        .map(r => `### ${r.uri}\n\`\`\`\n${r.text}\n\`\`\``)
+        .join("\n\n");
+      situation = `${situation}\n\n## Attached documents\n${resourceBlock}`;
+    }
+    if (reframeResourceErrors.length) {
+      situation = `${situation}\n\n## Resource read errors\n${reframeResourceErrors.map(e => `- ${e}`).join("\n")}`;
+    }
     const startTime = Date.now();
     const sections = [];
     const phases = [];
@@ -839,35 +947,29 @@ Rules:
 - Reference specific details from the user's situation in every idea.
 - If the user provided constraints, respect them in Waves A-B but deliberately break them in Wave C.`;
 
-const DIVERGE_DESCRIPTION = `Divergent idea generator. Takes a problem and produces 20 ideas in 3 waves: obvious (5), adjacent (10), and wild (5) — then surfaces the 3-5 non-obvious ideas most worth testing. Uses cross-domain analogy, constraint inversion, and forced volume to escape predictable thinking.
-
-USE THIS TOOL WHEN:
-- User needs ideas, options, or creative solutions
-- User says "give me ideas", "what could we try", "brainstorm this", "how else could we do this", "think outside the box"
-- After using reframe — generating ideas from a reframed angle produces much better results
-- User is choosing between limited options and needs more possibilities
-- The obvious approaches have already been tried or dismissed
-
-DO NOT USE WHEN:
-- User needs a problem reframed, not solved (use reframe)
-- User has ideas and needs them critiqued (use debate)
-- Simple tasks with known solutions
-- User wants a single recommendation, not a menu of options
-
-PIPELINE: For complex problems, STRONGLY RECOMMEND using the "think" tool instead (runs all phases in one call). If using diverge alone, follow up with debate to stress-test the best idea.
-
-Returns evidence + instructions. You (Claude) generate the 20 ideas and top picks, then help the user evaluate and optionally send the best one to debate.`;
+const DIVERGE_DESCRIPTION = `Generates 20 ideas in 3 waves (5 obvious, 10 adjacent, 5 wild) then picks the 3-5 non-obvious ones with 72-hour tests. Use when the user needs creative options, not a single answer. Returns research + an ideation template Claude fills in.`;
 
 server.tool(
   "diverge",
   DIVERGE_DESCRIPTION,
   {
-    situation: z.string().describe("The problem, challenge, or opportunity to generate ideas for. Include all relevant context — what's been tried, what constraints exist, what resources are available. The model only knows what you send it."),
-    constraints: z.string().optional().describe("Real constraints to respect in Waves A and B (e.g., 'budget under $1000', 'must use existing team', 'B2B only'). Wave C will deliberately break these to find wild ideas."),
-    avoid: z.string().optional().describe("Obvious solutions to explicitly skip (e.g., 'we already tried paid ads and SEO'). Forces the model away from defaults."),
-    reframe: z.string().optional().describe("A specific reframe/angle to generate ideas from (often the output of the reframe tool). E.g., 'The real problem isn't customer acquisition, it's that customers don't trust us enough to start.' Focuses all 20 ideas through this lens."),
+    situation: z.string().describe("The problem, challenge, or opportunity to generate ideas for. Include what's been tried and what resources are available."),
+    constraints: z.string().optional().describe("Real constraints to respect in Waves A and B (e.g., 'budget under $1000', 'B2B only'). Wave C deliberately breaks these."),
+    avoid: z.string().optional().describe("Obvious solutions to explicitly skip (e.g., 'we already tried paid ads and SEO')."),
+    reframe: z.string().optional().describe("A specific reframe/angle to generate ideas from (often output of the reframe tool). Focuses all 20 ideas through this lens."),
+    resource_uris: z.array(z.string()).optional().describe("file:// URIs the server will read and append to the situation. Per-file and total caps apply (default 500KB)."),
   },
-  async ({ situation, constraints, avoid, reframe: reframeAngle }) => {
+  async ({ situation, constraints, avoid, reframe: reframeAngle, resource_uris }) => {
+    const { contents: divergeResources, errors: divergeResourceErrors } = await readResourceUris(resource_uris);
+    if (divergeResources.length) {
+      const resourceBlock = divergeResources
+        .map(r => `### ${r.uri}\n\`\`\`\n${r.text}\n\`\`\``)
+        .join("\n\n");
+      situation = `${situation}\n\n## Attached documents\n${resourceBlock}`;
+    }
+    if (divergeResourceErrors.length) {
+      situation = `${situation}\n\n## Resource read errors\n${divergeResourceErrors.map(e => `- ${e}`).join("\n")}`;
+    }
     const startTime = Date.now();
     const sections = [];
     const phases = [];
@@ -954,38 +1056,56 @@ server.tool(
 // ORIGINAL question, enriched with reframe/diverge context.
 // =========================================================
 
-const THINK_DESCRIPTION = `Full thinking pipeline in one call. Runs all phases: reframe the problem, generate divergent ideas, then run a REAL multi-model adversarial debate (GPT Skeptic + Gemini Steelman) on the ORIGINAL question — enriched with compressed reframe/diverge perspectives.
-
-IMPORTANT: The debate at the end is about the ORIGINAL question, NOT about the reframe or diverge outputs. Reframe and diverge are additive research that feeds into the debate — they don't replace the topic being debated.
-
-USE THIS TOOL WHEN:
-- User says "think about this", "help me figure this out", "I need to think through this", "what should I do about this"
-- Complex problems that benefit from seeing it differently AND generating ideas AND stress-testing
-- User wants the full pipeline without calling 3 separate tools
-- Any time you would have recommended running all 3 tools in sequence
-
-DO NOT USE WHEN:
-- User specifically wants ONLY critique (use debate)
-- User specifically wants ONLY reframing (use reframe)
-- User specifically wants ONLY ideas (use diverge)
-- Simple questions with clear answers
-
-Cost: ~$0.25-0.30 per run (evidence + GPT + Gemini for the real adversarial debate). The reframe and diverge phases are free (Claude generates).
-
-Returns: Claude's reframes and ideas PLUS a full multi-model debate transcript on the original question. You (Claude) MUST synthesize the debate using the constrained format.`;
+const THINK_DESCRIPTION = `Full pipeline: reframe + diverge + real multi-model adversarial debate on the original question, with Google Search grounding. Use for complex high-stakes decisions that need both creative exploration and stress-testing. Supports structured fields and resource_uris to avoid context rot. Claude MUST synthesize the debate using the format printed at the end.`;
 
 server.tool(
   "think",
   THINK_DESCRIPTION,
   {
-    situation: z.string().describe("The problem, challenge, or decision. Include all relevant context. The model only knows what you send it."),
-    question: z.string().optional().describe("The specific question to answer. This is what gets DEBATED at the end — the original question. If omitted, a general analysis is performed."),
+    situation: z.string().optional().describe("Narrative context for the problem. Optional if you provide structured fields or resource_uris. Prefer structured extraction over long prose."),
+    question: z.string().optional().describe("The specific question that gets DEBATED at the end. If omitted, a general analysis is performed."),
     domain: z.string().optional().describe("Domain expertise for the debate phase. Examples: 'tax attorney', 'systems architect'."),
-    constraints: z.string().optional().describe("Real constraints to respect."),
-    avoid: z.string().optional().describe("Obvious solutions to skip."),
+    constraints: z.string().optional().describe("Real constraints for the reframe/diverge phases (shorthand form). For the debate phase, prefer constraints_list."),
+    avoid: z.string().optional().describe("Obvious solutions to skip during idea generation."),
     current_leaning: z.string().optional().describe("What you're currently leaning toward. The Skeptic will attack this."),
+    ...STRUCTURED_FIELD_SHAPE,
   },
-  async ({ situation, question, domain, constraints, avoid, current_leaning }) => {
+  async ({
+    situation,
+    question,
+    domain,
+    constraints,
+    avoid,
+    current_leaning,
+    decision_statement,
+    options,
+    constraints_list,
+    key_evidence,
+    unresolved_uncertainties,
+    stakes,
+    resource_uris,
+  }) => {
+    const { contents: resources, errors: resourceErrors } = await readResourceUris(resource_uris);
+    const composedContext = composeStructuredContext({
+      narrative: situation,
+      decision_statement,
+      options,
+      constraints_list,
+      key_evidence,
+      unresolved_uncertainties,
+      stakes,
+      resources,
+      resourceErrors,
+    });
+    if (!composedContext) {
+      return {
+        content: [{
+          type: "text",
+          text: "Error: think requires at least one of `situation`, `decision_statement`, `options`, `key_evidence`, or `resource_uris`.",
+        }],
+      };
+    }
+    situation = composedContext;
     const startTime = Date.now();
     const sections = [];
     const phases = [];

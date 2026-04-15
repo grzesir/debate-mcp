@@ -21,6 +21,24 @@ Multi-model adversarial critique. Sends your problem to GPT (Skeptic) and Gemini
 
 **Cost:** ~$0.15-0.25 per run (GPT + Gemini + Google Search)
 
+**Structured inputs** (v5): instead of dumping a single long `context` string, prefer structured fields — the server composes them into an anchored, high-signal prompt the analysts can actually reason about:
+
+| Field | Type | What it's for |
+|---|---|---|
+| `decision_statement` | string | One-sentence statement of the exact decision being evaluated |
+| `options` | string[] | The specific options or paths under consideration |
+| `constraints_list` | string[] | Hard constraints the decision must respect |
+| `key_evidence` | string[] | Direct verbatim quotes, facts, or numbers — do not paraphrase |
+| `unresolved_uncertainties` | string[] | Questions you don't yet have answers to |
+| `stakes` | string | What happens if this decision is wrong |
+| `resource_uris` | string[] | `file://` URIs the server reads and injects verbatim |
+| `context` | string | Optional narrative prose (fallback) |
+| `question` | string | Specific question to focus the debate |
+| `current_leaning` | string | What you're leaning toward — the Skeptic attacks this |
+| `domain` | string | Domain expertise injected into both analysts |
+
+At least one of `context`, `decision_statement`, `options`, `key_evidence`, or `resource_uris` must be provided.
+
 ```
 You describe your plan
         │
@@ -160,6 +178,18 @@ Pricing defaults (for cost tracking):
 **diverge** uses the Wave method (obvious → adjacent → wild) with cross-domain analogy and constraint inversion — techniques backed by creativity research (Guilford, Torrance, De Bono, IDEO).
 
 **reframe and diverge** gather web evidence via Gemini + Google Search, then return structured instructions that Claude follows. Only the evidence search costs money — the creative generation is done by whatever model is already running your session.
+
+## Why structured inputs (v5, 2026-04)
+
+Earlier versions of this server asked callers to "include ALL relevant details" in a single `context` string. That turned out to be exactly the wrong instruction:
+
+1. **Tool description bloat taxes the caller.** MCP tool descriptions are loaded into the calling model's context on every turn. Verbose instructions like "PASS THE FULL CONTEXT, don't summarize, more is better" permanently eat the caller's token budget even when the tool is not invoked. Research from 2025/2026 found that multi-server MCP setups can burn 50k–80k tokens (up to 40% of the window) on tool descriptions alone before a user types a character.
+
+2. **Dumping raw text triggers context rot in the analysts.** The "Lost in the Middle" effect (Liu et al. TACL 2024, Chroma 2025) shows that frontier model attention concentrates on the beginning and end of prompts — information buried in the middle of a long dump can see 30%+ accuracy drops. The Maximum Effective Context Window is typically 1–10% of the advertised window. A 50k-token `context` blob is not a richer debate, it's a debate with the decisive facts invisible.
+
+3. **The bottleneck is signal quality, not raw volume.** A debate tool's job is to attack a specific decision with specific evidence. Structured fields (`decision_statement`, `options`, `key_evidence`, `unresolved_uncertainties`) force the caller to extract the decision-relevant facts instead of paraphrasing, and pin them in named buckets the analysts can find. Resource URIs let the server fetch full documents directly without bloating the caller's prompt at all.
+
+The fix is architectural, not prose. Tool descriptions are kept to 1–2 sentences. Structured extraction replaces raw dumps. Pass-by-reference via `file://` URIs bypasses the caller's context window entirely.
 
 ## License
 
