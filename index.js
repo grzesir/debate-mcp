@@ -222,6 +222,61 @@ async function callGemini(prompt, systemPrompt, enableSearch = false) {
   }
 }
 
+// --- Targeted Verification (Phase 1.5) ---
+//
+// After Round 1, the analysts surface claims they've explicitly tagged
+// UNVERIFIED. Instead of letting those float into Round 2 unresolved,
+// we re-run a small Google-Search-grounded query against ONLY those
+// specific claims, then inject the results back into the R2 prompts.
+// Cost: one extra Gemini call (~$0.04-0.06) to convert "we're not sure"
+// into "verified or refuted with sources" before cross-examination.
+
+const MAX_UNVERIFIED_CLAIMS = parseInt(process.env.MAX_UNVERIFIED_CLAIMS || "6");
+
+function extractUnverifiedClaims(text, maxClaims = MAX_UNVERIFIED_CLAIMS) {
+  if (!text) return [];
+  const lines = text.split("\n");
+  const claims = [];
+  const seen = new Set();
+  for (const rawLine of lines) {
+    if (!/UNVERIFIED/i.test(rawLine)) continue;
+    // Strip markdown bullets, headers, bold/italics, code ticks
+    let cleaned = rawLine
+      .replace(/^[\s>#-]+/, "")
+      .replace(/[*_`]/g, "")
+      .replace(/^\d+\.\s*/, "")
+      .trim();
+    // Drop the "UNVERIFIED:" / "UNVERIFIED but plausible:" prefix if it dominates the line
+    cleaned = cleaned.replace(/^UNVERIFIED[^:]*:\s*/i, "").trim();
+    if (cleaned.length < 25 || cleaned.length > 600) continue;
+    const key = cleaned.toLowerCase().slice(0, 120);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    claims.push(cleaned);
+    if (claims.length >= maxClaims) break;
+  }
+  return claims;
+}
+
+async function verifyClaims(claims) {
+  if (!claims || claims.length === 0) return null;
+  const prompt = `Research and verify or refute each of the following specific claims using current authoritative sources from web search. For each claim, output a single line in this format:
+
+[CLAIM N]: VERIFIED | REFUTED | INCONCLUSIVE — one-sentence finding with source domain (e.g. "irs.gov", "anthropic.com").
+
+Be terse. Two sentences max per claim. Do not editorialize. Do not add caveats beyond the source.
+
+CLAIMS TO VERIFY:
+${claims.map((c, i) => `${i + 1}. ${c}`).join("\n")}`;
+
+  const result = await callGemini(
+    prompt,
+    "You are a fact-checking research assistant. Use Google Search to verify or refute each claim with current authoritative sources. Return a terse, parseable verdict per claim. Do not give opinions.",
+    true
+  );
+  return result;
+}
+
 // --- Evidence Gathering (Web Search via Gemini + Google Search) ---
 
 async function gatherEvidence(context, question) {
@@ -444,10 +499,10 @@ const STRUCTURED_FIELD_SHAPE = {
 
 const server = new McpServer({
   name: "debate",
-  version: "5.0.0",
+  version: "5.1.0",
 });
 
-const TOOL_DESCRIPTION = `Adversarial multi-model critique (GPT Skeptic + Gemini Steelman) of a high-stakes decision, with Google Search grounding and anonymized cross-examination. Use for tax/legal/financial/architecture/strategy calls when you need to know what you're missing. Prefer structured fields (decision_statement, options, key_evidence) or resource_uris over raw context dumps — they protect against context rot in the analyst models. Claude MUST synthesize the transcript using the format printed at the end.`;
+const TOOL_DESCRIPTION = `Full-pipeline thinking + adversarial debate. Runs reframe + diverge + Google-grounded evidence + GPT Skeptic vs Gemini Steelman with anonymized cross-examination, plus a targeted verification round that re-searches any claims the analysts mark UNVERIFIED. Use this whenever the user says "debate", "think about", "stress-test", "what am I missing", or wants a high-stakes decision evaluated. Prefer structured fields (decision_statement, options, key_evidence) and resource_uris — pre-flight grep claude-mem and the user's filesystem and pass relevant findings as key_evidence/resource_uris before calling. Claude MUST synthesize the transcript using the format printed at the end.`;
 
 server.tool(
   "debate",
@@ -458,6 +513,7 @@ server.tool(
     domain: z.string().optional().describe("Domain expertise to inject into both analysts. Examples: 'tax attorney', 'systems architect', 'financial advisor'."),
     current_leaning: z.string().optional().describe("What the user is currently leaning toward. The Skeptic will specifically attack this leaning to counter confirmation bias."),
     additive_context: z.string().optional().describe("Supplementary perspectives from reframe/diverge tools. Compressed one-line summaries only, not raw dumps — treated as background intelligence, not as the topic being debated."),
+    pipeline: z.boolean().optional().describe("Default true. When true, also emits reframe + diverge phase instructions (free, Claude generates) so a single `debate` call gives you the full think pipeline. Set false for fast critique-only mode."),
     ...STRUCTURED_FIELD_SHAPE,
   },
   async ({
@@ -466,6 +522,7 @@ server.tool(
     domain,
     current_leaning,
     additive_context,
+    pipeline,
     decision_statement,
     options,
     constraints_list,
@@ -474,6 +531,7 @@ server.tool(
     stakes,
     resource_uris,
   }) => {
+    const runPipeline = pipeline !== false;
     const { contents: resources, errors: resourceErrors } = await readResourceUris(resource_uris);
     const composedContext = composeStructuredContext({
       narrative: context,
@@ -550,6 +608,36 @@ server.tool(
     }
 
     // =========================================================
+    // PIPELINE PHASES (reframe + diverge + compress)
+    // Free — generated by Claude (the calling model) as it reads
+    // the response. Same machinery as the `think` tool, but emitted
+    // inside `debate` because most users say "debate this" when
+    // they mean "think hard about this."
+    // =========================================================
+    if (runPipeline) {
+      sections.push(
+        `\n---\n`,
+        `## Pipeline Phase 1: REFRAME (Claude: generate 5-6 reframes of the original question)\n`,
+        REFRAME_SYSTEM,
+        ``,
+        `**SITUATION:** ${context}`,
+        ``,
+        `Apply 5-6 thinking operators. Then pick the 1-2 most promising angles.`,
+        ``,
+        `## Pipeline Phase 2: DIVERGE (Claude: generate 20 ideas from the best reframe)\n`,
+        DIVERGE_SYSTEM,
+        ``,
+        `Generate 20 ideas through the lens of your best reframe. Then pick Top 3-5.`,
+        ``,
+        `## Pipeline Phase 3: COMPRESS (Claude: prepare additive context)`,
+        ``,
+        `Compress reframe + diverge into ≤500 words of high-signal background intelligence. The debate transcript below is about the ORIGINAL QUESTION — these phases are supplementary perspectives Claude folds into the final synthesis, not the topic being debated.`,
+        ``,
+        `---\n`,
+      );
+    }
+
+    // =========================================================
     // ROUND 1: Independent Analysis (parallel, with evidence)
     // =========================================================
 
@@ -579,6 +667,44 @@ server.tool(
       `### Analyst A (Skeptic)\n${skepticR1.text}\n`,
       `### Analyst B (Steelman)\n${steelmanR1.text}`,
     );
+
+    // =========================================================
+    // PHASE 1.5: Targeted Verification of UNVERIFIED claims
+    // Both analysts mark uncertain claims with "UNVERIFIED" tags.
+    // We pull those out and run a single targeted Gemini+Search
+    // call to verify or refute them, then inject the new evidence
+    // into the R2 cross-exam prompt. Skipped if no claims surfaced.
+    // =========================================================
+
+    let verificationPack = null;
+    let verifiedClaims = [];
+    if (skepticR1.ok && steelmanR1.ok) {
+      const skepticUnverified = extractUnverifiedClaims(skepticR1.text);
+      const steelmanUnverified = extractUnverifiedClaims(steelmanR1.text);
+      const seen = new Set();
+      verifiedClaims = [...skepticUnverified, ...steelmanUnverified].filter(c => {
+        const key = c.toLowerCase().slice(0, 120);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, MAX_UNVERIFIED_CLAIMS);
+
+      if (verifiedClaims.length > 0) {
+        const verification = await verifyClaims(verifiedClaims);
+        if (verification) {
+          recordPhase("verification", verification);
+          if (verification.ok) {
+            verificationPack = verification.text;
+            sections.push(
+              `\n## Phase 1.5: Targeted Verification`,
+              `_Re-searched ${verifiedClaims.length} claim${verifiedClaims.length === 1 ? "" : "s"} marked UNVERIFIED in Round 1, with fresh Google Search grounding._\n`,
+              verificationPack,
+              ``,
+            );
+          }
+        }
+      }
+    }
 
     // Shared logging record — filled in progressively so errored debates
     // still get persisted with whatever we managed to collect.
@@ -650,7 +776,7 @@ server.tool(
 
 ORIGINAL CONTEXT:
 ${context}
-${evidencePack ? `\nVERIFIED EVIDENCE (from web search):\n${evidencePack}\n` : ""}
+${evidencePack ? `\nVERIFIED EVIDENCE (from web search):\n${evidencePack}\n` : ""}${verificationPack ? `\nNEWLY VERIFIED EVIDENCE (targeted re-search of UNVERIFIED Round 1 claims — treat these verdicts as authoritative):\n${verificationPack}\n` : ""}
 YOUR PREVIOUS ANALYSIS:
 {MY_ANALYSIS}
 
@@ -1215,13 +1341,42 @@ server.tool(
       `### Steelman Analysis\n${steelmanR1.text}\n`,
     );
 
+    // Phase 1.5: targeted verification of UNVERIFIED claims from R1
+    let thinkVerificationPack = null;
+    if (skepticR1.ok && steelmanR1.ok) {
+      const skepticUnverified = extractUnverifiedClaims(skepticR1.text);
+      const steelmanUnverified = extractUnverifiedClaims(steelmanR1.text);
+      const seen = new Set();
+      const uniqueUnverified = [...skepticUnverified, ...steelmanUnverified].filter(c => {
+        const key = c.toLowerCase().slice(0, 120);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, MAX_UNVERIFIED_CLAIMS);
+      if (uniqueUnverified.length > 0) {
+        const verification = await verifyClaims(uniqueUnverified);
+        if (verification) {
+          recordPhase("verification", verification);
+          if (verification.ok) {
+            thinkVerificationPack = verification.text;
+            sections.push(
+              `## Phase 4.5: Targeted Verification`,
+              `_Re-searched ${uniqueUnverified.length} claim${uniqueUnverified.length === 1 ? "" : "s"} marked UNVERIFIED in Round 1._\n`,
+              thinkVerificationPack,
+              ``,
+            );
+          }
+        }
+      }
+    }
+
     // Round 2 cross-examination (if both succeeded)
     if (skepticR1.ok && steelmanR1.ok) {
       const crossExam = `ORIGINAL QUESTION (re-stated to prevent drift): ${focusQuestion}
 
 ORIGINAL CONTEXT:
 ${situation}
-${evidencePack ? `\nVERIFIED EVIDENCE:\n${evidencePack}\n` : ""}
+${evidencePack ? `\nVERIFIED EVIDENCE:\n${evidencePack}\n` : ""}${thinkVerificationPack ? `\nNEWLY VERIFIED EVIDENCE (targeted re-search of UNVERIFIED Round 1 claims — treat as authoritative):\n${thinkVerificationPack}\n` : ""}
 YOUR PREVIOUS ANALYSIS:
 {MY_ANALYSIS}
 

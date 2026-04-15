@@ -1,6 +1,6 @@
 {
   "name": "debate-mcp",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "description": "Three thinking tools for Claude Code: debate (adversarial critique), reframe (problem reframing), and diverge (divergent idea generation). Multi-model with web search grounding.",
   "type": "module",
   "bin": {
