@@ -114,13 +114,25 @@ npm install
 
 ### 3. Set API keys
 
-Either set environment variables directly:
+**macOS / Linux:**
 ```bash
 export OPENAI_API_KEY="sk-..."
 export GEMINI_API_KEY="AI..."
 ```
 
-Or create a `.env` file in the project directory:
+**Windows (PowerShell):**
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+$env:GEMINI_API_KEY = "AI..."
+```
+
+**Windows (cmd):**
+```cmd
+set OPENAI_API_KEY=sk-...
+set GEMINI_API_KEY=AI...
+```
+
+Or create a `.env` file in the project directory (works on all platforms):
 ```
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=AI...
@@ -128,7 +140,17 @@ GEMINI_API_KEY=AI...
 
 ### 4. Add to Claude Code
 
-Add to `~/.claude/settings.json`:
+**Easiest — use the CLI (cross-platform):**
+
+```bash
+# macOS / Linux
+claude mcp add thinking-tools -s user -- bash /path/to/debate-mcp/run.sh
+
+# Windows (Git Bash or WSL must be on PATH for bash)
+claude mcp add thinking-tools -s user -- bash C:/Users/YOU/debate-mcp/run.sh
+```
+
+**Or hand-edit `~/.claude.json`:**
 
 ```json
 {
@@ -140,6 +162,12 @@ Add to `~/.claude/settings.json`:
   }
 }
 ```
+
+**Windows notes:**
+
+- `run.sh` has a `#!/bin/bash` shebang, so you need a working `bash` on PATH. **Git Bash** (ships with Git for Windows) and **WSL** (`bash.exe` on PATH) both work. PowerShell/cmd alone do not.
+- Use forward slashes in paths (`C:/Users/.../debate-mcp/run.sh`) inside JSON or the CLI — JSON-escaped backslashes (`C:\\Users\\...`) also work but are noisier.
+- If you have multiple `bash.exe` on PATH (Git Bash, WSL, MSYS2), the first one wins. Test with `where bash` to confirm which one Claude Code will invoke.
 
 Restart Claude Code. You'll see `debate`, `think`, `reframe`, and `diverge` available.
 
